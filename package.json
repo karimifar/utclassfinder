@@ -1,0 +1,41 @@
+{
+  "name": "utclassfinder",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "scripts": {
+    "start": "expo start --dev-client",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "build:data": "node scripts/build-buildings.mjs ../../buildings_rooms.geojson assets/data/buildings.json",
+    "build:rooms": "node scripts/build-room-index.mjs",
+    "lint": "expo lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@rnmapbox/maps": "^10.1.33",
+    "expo": "^53.0.0",
+    "expo-application": "^6.1.5",
+    "expo-asset": "^11.1.7",
+    "expo-auth-session": "~6.2.0",
+    "expo-constants": "~17.1.0",
+    "expo-crypto": "~14.1.0",
+    "expo-file-system": "^18.1.11",
+    "expo-font": "^13.3.2",
+    "expo-keep-awake": "^14.1.4",
+    "expo-linking": "~7.1.0",
+    "expo-location": "~18.1.0",
+    "expo-router": "~5.1.0",
+    "expo-secure-store": "~14.2.0",
+    "expo-status-bar": "~2.2.0",
+    "expo-web-browser": "^14.2.0",
+    "react": "19.0.0",
+    "react-native": "0.79.5",
+    "react-native-safe-area-context": "5.4.0",
+    "react-native-screens": "~4.11.0"
+  },
+  "devDependencies": {
+    "@types/react": "~19.0.10",
+    "typescript": "~5.8.3"
+  }
+}

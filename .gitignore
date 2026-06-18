@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native — iOS (commit source, ignore generated artifacts)
+ios/Pods/
+ios/build/
+ios/*.orig.*
+
+# Native — Android (not yet generated)
+android/
+
+# Secrets / env
+.env
+.env.local
+*.jks
+*.keystore
+*.p8
+*.p12
+*.mobileprovision
+
+# Misc
+.DS_Store
+*.log
+npm-debug.*
+yarn-error.*
