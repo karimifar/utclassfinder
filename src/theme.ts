@@ -11,6 +11,11 @@ export const colors = {
   white: '#FFFFFF',
   highlightFill: 'rgba(191, 87, 0, 0.25)',
   highlightLine: '#BF5700',
+  shade: '#9cadb7',
+  blueBonnet: '#005f86',
+  tangerine: '#f8971f',
+  sunshine: '#ffd600',
+  limestone: '#d6d2c4',
 };
 
 export const spacing = { xs: 4, sm: 8, md: 16, lg: 24, xl: 32 };

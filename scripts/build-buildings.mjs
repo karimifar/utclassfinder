@@ -16,6 +16,10 @@
  *   node scripts/build-buildings.mjs <input.geojson> [output.json]
  */
 import fs from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const input = process.argv[2];
 const output = process.argv[3] ?? 'assets/data/buildings.json';
@@ -45,6 +49,17 @@ function convexHull(points) {
 }
 
 const round = (n) => Math.round(n * 1e6) / 1e6;
+
+// Load footprint building IDs from campus_buildings.geojson for the hasFootprint flag.
+const footprintsPath = join(__dirname, '..', 'assets/data/campus_buildings.geojson');
+const footprintIds = new Set();
+if (fs.existsSync(footprintsPath)) {
+  const fp = JSON.parse(fs.readFileSync(footprintsPath, 'utf8'));
+  for (const f of fp.features ?? []) {
+    if (f.properties?.Building) footprintIds.add(f.properties.Building);
+  }
+  console.log(`Loaded ${footprintIds.size} footprint building IDs from campus_buildings.geojson`);
+}
 
 console.log(`Reading ${input} ...`);
 const data = JSON.parse(fs.readFileSync(input, 'utf8'));
@@ -84,6 +99,7 @@ for (const b of buildings.values()) {
     footprint: hull,
     floors: [...b.floors].sort(),
     roomCount: b.roomCount,
+    hasFootprint: footprintIds.has(b.id),
   });
 }
 

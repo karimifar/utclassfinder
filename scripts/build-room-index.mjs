@@ -14,11 +14,29 @@ const geojson = JSON.parse(
   readFileSync(join(root, 'assets/data/buildings_rooms.geojson'), 'utf8')
 );
 
+// Room types that are not navigable destinations — hallways, bathrooms,
+// mechanical/utility rooms, custodial spaces, construction areas, etc.
+const NON_NAVIGABLE = new Set([
+  'circulation areas (non e&g)',
+  'mechanical areas (non-e&g)',
+  'public rest rooms (non e&g)',
+  'custodial areas (non e&g)',
+  'shell space (non e&g)',
+  'building maintenance',
+  'utilities',
+  'construction project management',
+  'landscape and grounds maintenance',
+  'operation and maintenance',
+  'floor',
+  'to be determined',
+]);
+
 const index = [];
 
 for (const feature of geojson.features) {
-  const { room_id, bldg_no, building_abbr, floor } = feature.properties;
+  const { room_id, bldg_no, building_abbr, floor, room_type } = feature.properties;
   if (!room_id) continue;
+  if (room_type && NON_NAVIGABLE.has(room_type)) continue;
 
   // room_id format: "{bldg_no}-{floor}-{roomNumber}", e.g. "0152-07-2.216"
   const parts = room_id.split('-');

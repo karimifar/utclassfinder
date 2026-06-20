@@ -31,6 +31,20 @@ function getRoomsByBuilding(): Map<string, RoomIndexEntry[]> {
   return _roomsByBuilding;
 }
 
+// Sort rooms so exact matches come first, then by room number length ascending.
+// This ensures "220" ranks above "2209A" when the user typed "220".
+function rankRooms(rooms: RoomIndexEntry[], token: string): RoomIndexEntry[] {
+  const upper = token.toUpperCase();
+  return [...rooms].sort((a, b) => {
+    const aUp = a.roomNumber.toUpperCase();
+    const bUp = b.roomNumber.toUpperCase();
+    const aExact = aUp === upper ? 0 : 1;
+    const bExact = bUp === upper ? 0 : 1;
+    if (aExact !== bExact) return aExact - bExact;
+    return aUp.length - bUp.length;
+  });
+}
+
 /**
  * Return up to `limit` rooms whose number starts with the room token in `query`.
  * Returns [] when the query has no room token or the building isn't recognised.
@@ -42,14 +56,10 @@ export function searchRooms(query: string, limit = 8): RoomMatch[] {
   if (!building) return [];
   const token = roomToken.toUpperCase();
   const rooms = getRoomsByBuilding().get(building.id) ?? [];
-  const results: RoomMatch[] = [];
-  for (const r of rooms) {
-    if (r.roomNumber.toUpperCase().startsWith(token)) {
-      results.push({ building, roomId: r.room_id, bldgNo: r.bldg_no, center: r.center, floor: r.floor, roomNumber: r.roomNumber });
-      if (results.length >= limit) break;
-    }
-  }
-  return results;
+  const matches = rooms.filter(r => r.roomNumber.toUpperCase().startsWith(token));
+  return rankRooms(matches, token).slice(0, limit).map(r => ({
+    building, roomId: r.room_id, bldgNo: r.bldg_no, center: r.center, floor: r.floor, roomNumber: r.roomNumber,
+  }));
 }
 
 /**
@@ -82,19 +92,23 @@ export function normalize(raw: string): string {
 
 /**
  * Split a room code into its building token and room token.
+ * All UT building abbreviations are exactly 3 characters, so the first 3
+ * characters are always the building token and everything after is the room.
  * "GDC 2.216" -> { buildingToken: "GDC", roomToken: "2.216" }
- * "cfa204"    -> { buildingToken: "CFA", roomToken: "204" }
- * "pcl"       -> { buildingToken: "PCL", roomToken: null }
+ * "MAI 220"   -> { buildingToken: "MAI", roomToken: "220" }
+ * "MAI220"    -> { buildingToken: "MAI", roomToken: "220" }
+ * "E26"       -> { buildingToken: "E26", roomToken: null }
+ * "GDC"       -> { buildingToken: "GDC", roomToken: null }
+ * "GD"        -> { buildingToken: "GD",  roomToken: null }  (partial, still works for prefix search)
  */
 export function parseRoomCode(raw: string): {
   buildingToken: string;
   roomToken: string | null;
 } {
-  const compact = normalize(raw).replace(/\s+/g, '');
-  const m = compact.match(/^([A-Z]+)(.*)$/);
-  if (!m) return { buildingToken: compact, roomToken: null };
-  const roomToken = m[2].trim();
-  return { buildingToken: m[1], roomToken: roomToken.length ? roomToken : null };
+  const norm = normalize(raw);
+  const buildingToken = norm.slice(0, 3);
+  const rest = norm.slice(3).trim();
+  return { buildingToken, roomToken: rest || null };
 }
 
 /**
@@ -106,7 +120,7 @@ export function getRoomsInBuilding(bldgNo: string, token = '', limit = 8): RoomM
   if (!building) return [];
   const rooms = getRoomsByBuilding().get(bldgNo) ?? [];
   const upper = token.trim().toUpperCase();
-  const filtered = upper ? rooms.filter(r => r.roomNumber.toUpperCase().startsWith(upper)) : rooms;
+  const filtered = upper ? rankRooms(rooms.filter(r => r.roomNumber.toUpperCase().startsWith(upper)), upper) : rooms;
   return filtered.slice(0, limit).map(r => ({
     building,
     roomId: r.room_id,

@@ -16,6 +16,8 @@ export interface Building {
   floors: string[];
   /** Number of room polygons that make up this building. */
   roomCount: number;
+  /** True when a footprint polygon exists in campus_buildings.geojson. */
+  hasFootprint: boolean;
 }
 
 export interface SearchMatch {
