@@ -2,6 +2,7 @@
 // committed. See .env.example for the variables you need to set.
 module.exports = ({ config }) => ({
   ...config,
+  owner: 'karimifar',
   name: 'UT Class Finder',
   slug: 'utclassfinder',
   scheme: 'utclassfinder', // OAuth redirect: utclassfinder://redirect
@@ -47,4 +48,5 @@ module.exports = ({ config }) => ({
     router: {},
     eas: { projectId: '756f5fba-c920-461c-978d-55a2a765fa24' },
   },
+  
 });
