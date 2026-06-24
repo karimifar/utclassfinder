@@ -13,7 +13,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../src/auth/AuthContext';
 import { formatFloor, getBuildingById, sortedFloors } from '../src/data/buildings';
-import { getRoomsInBuilding, parseRoomCode, searchBuildings, searchRooms } from '../src/data/search';
+import { getRoomById, getRoomsInBuilding, parseRoomCode, searchBuildings, searchRooms } from '../src/data/search';
 import type { Building, RoomMatch, SearchMatch } from '../src/data/types';
 import { openDirectionsToCoordinate } from '../src/directions';
 import { CampusMap, CampusMapHandle } from '../src/map/CampusMap';
@@ -35,6 +35,9 @@ export default function Search() {
   const [selectedFloor, setSelectedFloor] = useState<string | null>(null);
   const [showResults, setShowResults] = useState(false);
   const [mapHeading, setMapHeading] = useState(0);
+  const [routeInfo, setRouteInfo] = useState<{ distance: number; duration: number } | null>(null);
+  const [navigateMode, setNavigateMode] = useState(false);
+  const [userCoords, setUserCoords] = useState<[number, number] | null>(null);
 
   const items: AutocompleteItem[] = useMemo(() => {
     if (selectedBuilding) {
@@ -60,6 +63,7 @@ export default function Search() {
   const handleSelect = (item: AutocompleteItem) => {
     Keyboard.dismiss();
     setShowResults(false);
+    setNavigateMode(false);
     if (item.kind === 'room') {
       setSelectedRoom(item.room);
       setSelectedFloor(item.room.floor);
@@ -74,9 +78,20 @@ export default function Search() {
     }
   };
 
+  const handleRoomPress = (roomId: string) => {
+    const room = getRoomById(roomId);
+    if (!room) return;
+    setNavigateMode(false);
+    setSelectedRoom(room);
+    setSelectedFloor(room.floor);
+    setQuery(room.roomNumber);
+    setShowResults(false);
+  };
+
   const handleBuildingPress = (buildingId: string) => {
     const building = getBuildingById(buildingId);
     if (!building) return;
+    setNavigateMode(false);
     setSelectedRoom(null);
     setSelectedBuilding(building);
     setSelectedFloor(sortedFloors(building.floors)[0] ?? null);
@@ -85,8 +100,13 @@ export default function Search() {
   };
 
   const handleBack = () => {
+    if (navigateMode) {
+      setNavigateMode(false);
+      return;
+    }
     if (selectedRoom) {
       setSelectedRoom(null);
+      setRouteInfo(null);
       setSelectedBuilding(selectedBuilding ?? selectedRoom.building);
       setSelectedFloor(selectedRoom.floor);
       setQuery('');
@@ -103,6 +123,8 @@ export default function Search() {
     if (selectedRoom) {
       // In room state, X = go all the way back to zero state
       setSelectedRoom(null);
+      setRouteInfo(null);
+      setNavigateMode(false);
       setSelectedBuilding(null);
       setSelectedFloor(null);
       setQuery('');
@@ -130,6 +152,10 @@ export default function Search() {
         selectedFloor={selectedFloor}
         onHeadingChange={setMapHeading}
         onBuildingPress={handleBuildingPress}
+        onRoomPress={handleRoomPress}
+        onRouteInfo={setRouteInfo}
+        onUserLocation={setUserCoords}
+        navigateMode={navigateMode}
       />
 
       {/* Map toolbar — zoom, location, compass */}
@@ -288,8 +314,8 @@ export default function Search() {
         </View>
       )}
 
-      {/* Room state — room info panel with navigate CTA */}
-      {selectedRoom && (
+      {/* Room state — info panel with two CTAs */}
+      {selectedRoom && !navigateMode && (
         <View style={[styles.bottomPanel, { bottom: insets.bottom + spacing.md }]}>
           <View style={styles.panelHeader}>
             <View style={styles.panelBadge}>
@@ -301,8 +327,19 @@ export default function Search() {
             {titleCase(selectedRoom.building.name)}
           </Text>
           <Text style={styles.roomFloor}>{formatFloor(selectedRoom.floor)}</Text>
+          {routeInfo && (
+            <Text style={styles.routeInfo}>
+              ~{Math.max(1, Math.round(routeInfo.duration / 60))} min walk · {Math.round(routeInfo.distance)} m
+            </Text>
+          )}
           <Pressable
-            style={styles.navigateBtn}
+            style={styles.walkBtn}
+            onPress={() => setNavigateMode(true)}
+          >
+            <Text style={styles.walkBtnText}>Walk here</Text>
+          </Pressable>
+          <Pressable
+            style={styles.mapsBtn}
             onPress={() =>
               openDirectionsToCoordinate(
                 selectedRoom.center,
@@ -310,7 +347,32 @@ export default function Search() {
               )
             }
           >
-            <Text style={styles.navigateBtnText}>Navigate here</Text>
+            <Text style={styles.mapsBtnText}>Open in Maps</Text>
+          </Pressable>
+        </View>
+      )}
+
+      {/* Navigate mode — compact bar with bearing arrow and ETA */}
+      {selectedRoom && navigateMode && (
+        <View style={[styles.navBar, { bottom: insets.bottom + spacing.md }]}>
+          <View style={styles.navArrowWrap}>
+            <Text style={[
+              styles.navArrow,
+              userCoords && { transform: [{ rotate: `${bearing(userCoords, selectedRoom.center)}deg` }] },
+            ]}>↑</Text>
+          </View>
+          <View style={styles.navInfo}>
+            <Text style={styles.navDest} numberOfLines={1}>
+              {selectedRoom.building.abbr} {selectedRoom.roomNumber}
+            </Text>
+            {routeInfo && (
+              <Text style={styles.navEta}>
+                ~{Math.max(1, Math.round(routeInfo.duration / 60))} min · {Math.round(routeInfo.distance)} m
+              </Text>
+            )}
+          </View>
+          <Pressable style={styles.navEnd} onPress={() => setNavigateMode(false)}>
+            <Text style={styles.navEndText}>End</Text>
           </Pressable>
         </View>
       )}
@@ -327,6 +389,16 @@ export default function Search() {
       )}
     </View>
   );
+}
+
+function bearing(from: [number, number], to: [number, number]): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const [lng1, lat1] = from.map(toRad);
+  const [lng2, lat2] = to.map(toRad);
+  const dLng = lng2 - lng1;
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+  return (Math.atan2(y, x) * 180) / Math.PI;
 }
 
 function titleCase(s: string | null): string {
@@ -470,14 +542,62 @@ const styles = StyleSheet.create({
   // Room info panel
   roomNumber: { fontSize: 20, fontWeight: '700', color: colors.ink },
   roomBuilding: { fontSize: 14, color: colors.slate, marginBottom: 2 },
-  roomFloor: { fontSize: 13, color: colors.mist, marginBottom: spacing.sm },
-  navigateBtn: {
+  roomFloor: { fontSize: 13, color: colors.mist, marginBottom: spacing.xs },
+  routeInfo: { fontSize: 13, color: colors.blueBonnet, fontWeight: '600', marginBottom: spacing.sm },
+  walkBtn: {
     backgroundColor: colors.burntOrange,
     borderRadius: radius.sm,
     paddingVertical: spacing.sm,
     alignItems: 'center',
+    marginBottom: spacing.sm,
   },
-  navigateBtnText: { color: colors.white, fontWeight: '700', fontSize: 15 },
+  walkBtnText: { color: colors.white, fontWeight: '700', fontSize: 15 },
+  mapsBtn: {
+    borderWidth: 1.5,
+    borderColor: colors.burntOrange,
+    borderRadius: radius.sm,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  mapsBtnText: { color: colors.burntOrange, fontWeight: '600', fontSize: 15 },
+
+  // Navigate mode bar
+  navBar: {
+    position: 'absolute',
+    left: spacing.md,
+    right: spacing.md,
+    backgroundColor: colors.white,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  navArrowWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.burntOrange,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  navArrow: { fontSize: 22, color: colors.white },
+  navInfo: { flex: 1 },
+  navDest: { fontSize: 15, fontWeight: '700', color: colors.ink },
+  navEta: { fontSize: 13, color: colors.slate, marginTop: 2 },
+  navEnd: {
+    borderWidth: 1.5,
+    borderColor: colors.mist,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs + 2,
+  },
+  navEndText: { fontSize: 14, fontWeight: '600', color: colors.slate },
 
   signOut: {
     position: 'absolute',

@@ -13,6 +13,8 @@ export const colors = {
   highlightLine: '#BF5700',
   shade: '#9cadb7',
   blueBonnet: '#005f86',
+  bathroomFill: 'rgba(0, 95, 134, 0.22)',
+  bathroomLine: '#005f86',
   tangerine: '#f8971f',
   sunshine: '#ffd600',
   limestone: '#d6d2c4',

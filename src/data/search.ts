@@ -131,6 +131,21 @@ export function getRoomsInBuilding(bldgNo: string, token = '', limit = 8): RoomM
   }));
 }
 
+export function getRoomById(roomId: string): RoomMatch | null {
+  const entry = getRoomIndex().find((r) => r.room_id === roomId);
+  if (!entry) return null;
+  const building = getBuildingById(entry.bldg_no);
+  if (!building) return null;
+  return {
+    building,
+    roomId: entry.room_id,
+    bldgNo: entry.bldg_no,
+    center: entry.center,
+    floor: entry.floor,
+    roomNumber: entry.roomNumber,
+  };
+}
+
 /**
  * Rank buildings against a query. Exact abbr match wins, then abbr prefix,
  * then name contains. Returns up to `limit` matches for autocomplete.

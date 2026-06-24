@@ -7,6 +7,34 @@ import { BUILDINGS } from '../data/buildings';
 import type { Building, RoomMatch } from '../data/types';
 import { colors } from '../theme';
 
+function splitRouteAtUser(
+  coords: [number, number][],
+  user: [number, number],
+): { walked: [number, number][]; remaining: [number, number][] } {
+  let bestDist = Infinity;
+  let bestIdx = 0;
+  let bestPoint: [number, number] = coords[0];
+
+  for (let i = 0; i < coords.length - 1; i++) {
+    const a = coords[i], b = coords[i + 1];
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const lenSq = dx * dx + dy * dy;
+    const t = lenSq === 0 ? 0 : Math.max(0, Math.min(1, ((user[0] - a[0]) * dx + (user[1] - a[1]) * dy) / lenSq));
+    const px = a[0] + t * dx, py = a[1] + t * dy;
+    const dist = (user[0] - px) ** 2 + (user[1] - py) ** 2;
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestIdx = i;
+      bestPoint = [px, py];
+    }
+  }
+
+  return {
+    walked: [...coords.slice(0, bestIdx + 1), bestPoint],
+    remaining: [bestPoint, ...coords.slice(bestIdx + 1)],
+  };
+}
+
 export interface CampusMapHandle {
   zoomIn: () => void;
   zoomOut: () => void;
@@ -61,15 +89,31 @@ interface Props {
   onUserLocation?: (coords: [number, number]) => void;
   onHeadingChange?: (heading: number) => void;
   onBuildingPress?: (buildingId: string) => void;
+  onRoomPress?: (roomId: string) => void;
+  onRouteInfo?: (info: { distance: number; duration: number } | null) => void;
+  navigateMode?: boolean;
 }
 
 export const CampusMap = forwardRef<CampusMapHandle, Props>(
-  function CampusMap({ selectedRoom, selectedBuilding, selectedFloor, cameraRef, onUserLocation, onHeadingChange, onBuildingPress }, ref) {
+  function CampusMap({ selectedRoom, selectedBuilding, selectedFloor, cameraRef, onUserLocation, onHeadingChange, onBuildingPress, onRoomPress, onRouteInfo, navigateMode }, ref) {
     const mapRef = useRef<Mapbox.MapView>(null);
     const [geojsonUri, setGeojsonUri] = useState<string | null>(null);
     const [buildingsUri, setBuildingsUri] = useState<string | null>(null);
+    const [route, setRoute] = useState<GeoJSON.Feature<GeoJSON.LineString> | null>(null);
+    const [walkedRoute, setWalkedRoute] = useState<GeoJSON.Feature<GeoJSON.LineString> | null>(null);
+    const [remainingRoute, setRemainingRoute] = useState<GeoJSON.Feature<GeoJSON.LineString> | null>(null);
+    // On the iOS simulator, GPS always reports San Francisco. Seed a campus coordinate so routes work during dev.
+    // On a real device we always use actual GPS, so the seed is skipped.
+    const isSimulator = __DEV__ && !Constants.isDevice;
+    const [hasLocation, setHasLocation] = useState(isSimulator);
     const hasHadSelection = useRef(false);
-    const userCoordsRef = useRef<[number, number] | null>(null);
+    const userCoordsRef = useRef<[number, number] | null>(isSimulator ? [-97.7335, 30.2849] : null);
+    const onRouteInfoRef = useRef(onRouteInfo);
+    useEffect(() => { onRouteInfoRef.current = onRouteInfo; });
+    const navigateModeRef = useRef(navigateMode);
+    useEffect(() => { navigateModeRef.current = navigateMode; }, [navigateMode]);
+    const routeRef = useRef(route);
+    useEffect(() => { routeRef.current = route; }, [route]);
 
     useImperativeHandle(ref, () => ({
       zoomIn: async () => {
@@ -101,6 +145,49 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
         .downloadAsync()
         .then((asset) => { if (asset.localUri) setBuildingsUri(asset.localUri); });
     }, []);
+
+    useEffect(() => {
+      if (navigateMode && route) {
+        const coords = route.geometry.coordinates as [number, number][];
+        const lngs = coords.map((c) => c[0]);
+        const lats = coords.map((c) => c[1]);
+        const ne: [number, number] = [Math.max(...lngs), Math.max(...lats)];
+        const sw: [number, number] = [Math.min(...lngs), Math.min(...lats)];
+        cameraRef.current?.fitBounds(ne, sw, [100, 80, 240, 80], 600);
+        setRemainingRoute({ type: 'Feature', properties: {}, geometry: route.geometry });
+        setWalkedRoute(null);
+      } else if (!navigateMode) {
+        setWalkedRoute(null);
+        setRemainingRoute(null);
+      }
+    }, [navigateMode, route, cameraRef]);
+
+    useEffect(() => {
+      if (!selectedRoom || !token) {
+        setRoute(null);
+        onRouteInfoRef.current?.(null);
+        return;
+      }
+      const origin = userCoordsRef.current;
+      if (!origin) return;
+
+      const controller = new AbortController();
+      const [dLng, dLat] = selectedRoom.center;
+      const [oLng, oLat] = origin;
+      fetch(
+        `https://api.mapbox.com/directions/v5/mapbox/walking/${oLng},${oLat};${dLng},${dLat}?geometries=geojson&access_token=${token}`,
+        { signal: controller.signal },
+      )
+        .then((r) => r.json())
+        .then((data) => {
+          const leg = data.routes?.[0];
+          if (!leg) return;
+          setRoute({ type: 'Feature', properties: {}, geometry: leg.geometry });
+          onRouteInfoRef.current?.({ distance: leg.distance, duration: leg.duration });
+        })
+        .catch(() => {});
+      return () => controller.abort();
+    }, [selectedRoom, hasLocation]);
 
     useEffect(() => {
       if (selectedRoom) {
@@ -171,6 +258,14 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
         ]
       : ['==', ['get', 'room_id'], '__none__'];
 
+    const bathroomFilter: any = (activeBldgNo && activeFloor)
+      ? ['all',
+          ['==', ['get', 'bldg_no'], activeBldgNo],
+          ['==', ['get', 'floor'], activeFloor],
+          ['==', ['get', 'room_type'], 'public rest rooms (non e&g)'],
+        ]
+      : ['==', ['get', 'room_id'], '__none__'];
+
     const roomFilter: any = highlightRoomId
       ? ['==', ['get', 'room_id'], highlightRoomId]
       : ['==', ['get', 'room_id'], '__none__'];
@@ -227,7 +322,15 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
           )}
 
           {geojsonUri && (
-            <Mapbox.ShapeSource id="all-rooms" url={geojsonUri}>
+            <Mapbox.ShapeSource
+              id="all-rooms"
+              url={geojsonUri}
+              onPress={(e) => {
+                if (!activeBldgNo || !activeFloor) return;
+                const roomId = e.features[0]?.properties?.room_id as string | undefined;
+                if (roomId) onRoomPress?.(roomId);
+              }}
+            >
               <Mapbox.FillLayer
                 id="floor-plan-fill"
                 filter={floorFilter}
@@ -237,6 +340,31 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
                 id="floor-plan-outline"
                 filter={floorFilter}
                 style={{ lineColor: 'rgba(26, 26, 26, 0.3)', lineWidth: 0.8 }}
+              />
+              <Mapbox.FillLayer
+                id="bathroom-fill"
+                filter={bathroomFilter}
+                style={{ fillColor: colors.bathroomFill, fillOpacity: 1 }}
+              />
+              <Mapbox.LineLayer
+                id="bathroom-outline"
+                filter={bathroomFilter}
+                style={{ lineColor: colors.bathroomLine, lineWidth: 1 }}
+              />
+              <Mapbox.SymbolLayer
+                id="bathroom-icon"
+                filter={bathroomFilter}
+                minZoomLevel={17.5}
+                style={{
+                  textField: 'WC',
+                  textFont: ['DIN Offc Pro Bold', 'Arial Unicode MS Bold'],
+                  textSize: 10,
+                  textColor: colors.white,
+                  textHaloColor: colors.bathroomLine,
+                  textHaloWidth: 2,
+                  textAllowOverlap: false,
+                  textIgnorePlacement: false,
+                }}
               />
               <Mapbox.SymbolLayer
                 id="floor-plan-labels"
@@ -297,13 +425,67 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
             />
           </Mapbox.ShapeSource>
 
+          {route && !navigateMode && (
+            <Mapbox.ShapeSource id="route" shape={route}>
+              <Mapbox.LineLayer
+                id="route-line"
+                style={{
+                  lineColor: colors.blueBonnet,
+                  lineWidth: 4,
+                  lineOpacity: 0.85,
+                  lineCap: 'round',
+                  lineJoin: 'round',
+                }}
+              />
+            </Mapbox.ShapeSource>
+          )}
+          {navigateMode && remainingRoute && (
+            <Mapbox.ShapeSource id="route-remaining" shape={remainingRoute}>
+              <Mapbox.LineLayer
+                id="route-remaining-line"
+                style={{
+                  lineColor: colors.blueBonnet,
+                  lineWidth: 4,
+                  lineOpacity: 0.85,
+                  lineCap: 'round',
+                  lineJoin: 'round',
+                }}
+              />
+            </Mapbox.ShapeSource>
+          )}
+          {navigateMode && walkedRoute && (
+            <Mapbox.ShapeSource id="route-walked" shape={walkedRoute}>
+              <Mapbox.LineLayer
+                id="route-walked-line"
+                style={{
+                  lineColor: colors.blueBonnet,
+                  lineWidth: 4,
+                  lineOpacity: 0.4,
+                  lineCap: 'butt',
+                  lineJoin: 'round',
+                  lineDasharray: [2, 2],
+                }}
+              />
+            </Mapbox.ShapeSource>
+          )}
+
           <Mapbox.UserLocation
             visible
-            androidRenderMode="normal"
+            showsUserHeadingIndicator
+            androidRenderMode="compass"
             onUpdate={(loc) => {
               const coords: [number, number] = [loc.coords.longitude, loc.coords.latitude];
-              userCoordsRef.current = coords;
+              if (!isSimulator) {
+                userCoordsRef.current = coords;
+                setHasLocation(true);
+              }
               onUserLocation?.(coords);
+              if (navigateModeRef.current && routeRef.current && !isSimulator) {
+                const routeCoords = routeRef.current.geometry.coordinates as [number, number][];
+                const { walked, remaining } = splitRouteAtUser(routeCoords, coords);
+                setWalkedRoute({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: walked } });
+                setRemainingRoute({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: remaining } });
+              }
             }}
           />
         </Mapbox.MapView>
