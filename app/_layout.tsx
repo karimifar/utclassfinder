@@ -37,7 +37,9 @@ export default function RootLayout() {
           <StatusBar style="dark" />
           <Stack screenOptions={{ headerTintColor: colors.burntOrange, headerTitleStyle: { color: colors.ink } }}>
             <Stack.Screen name="login" options={{ headerShown: false }} />
-            <Stack.Screen name="search" options={{ title: 'Find a Classroom' }} />
+            {/* Custom header inside the screen — the native bar wraps items in a
+                tinted glass capsule on iOS 26, which distorts the logo. */}
+            <Stack.Screen name="search" options={{ headerShown: false }} />
             <Stack.Screen name="building/[id]" options={{ title: 'Result' }} />
             <Stack.Screen name="index" options={{ headerShown: false }} />
           </Stack>

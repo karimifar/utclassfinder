@@ -1,4 +1,4 @@
-import Mapbox from '@rnmapbox/maps';
+import Mapbox, { UserTrackingMode } from '@rnmapbox/maps';
 import Constants from 'expo-constants';
 import { Asset } from 'expo-asset';
 import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
@@ -80,6 +80,21 @@ const BUILDING_TAP_MIN_ZOOM = 15;
 // Shifts the focal point to 35% from top (paddingBottom = 30% of screen height).
 const FOCUS_PADDING = { paddingTop: 0, paddingLeft: 0, paddingRight: 0, paddingBottom: Dimensions.get('window').height * 0.3 };
 const NO_PADDING   = { paddingTop: 0, paddingLeft: 0, paddingRight: 0, paddingBottom: 0 };
+// Navigate mode: puck sits low on screen so the route ahead fills the view.
+const NAV_PADDING  = { paddingTop: 0, paddingLeft: 0, paddingRight: 0, paddingBottom: Dimensions.get('window').height * 0.35 };
+const NAV_PITCH = 60;
+const NAV_ZOOM = 18;
+
+/** Bearing (degrees) of the first route segment, for the initial nav camera heading. */
+function segmentBearing(from: [number, number], to: [number, number]): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const [lng1, lat1] = from.map(toRad);
+  const [lng2, lat2] = to.map(toRad);
+  const dLng = lng2 - lng1;
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+  return (Math.atan2(y, x) * 180) / Math.PI;
+}
 
 interface Props {
   selectedRoom?: RoomMatch | null;
@@ -91,11 +106,13 @@ interface Props {
   onBuildingPress?: (buildingId: string) => void;
   onRoomPress?: (roomId: string) => void;
   onRouteInfo?: (info: { distance: number; duration: number } | null) => void;
+  /** Fires when the nav camera stops/starts following the user (map pan disengages follow). */
+  onFollowStateChange?: (disengaged: boolean) => void;
   navigateMode?: boolean;
 }
 
 export const CampusMap = forwardRef<CampusMapHandle, Props>(
-  function CampusMap({ selectedRoom, selectedBuilding, selectedFloor, cameraRef, onUserLocation, onHeadingChange, onBuildingPress, onRoomPress, onRouteInfo, navigateMode }, ref) {
+  function CampusMap({ selectedRoom, selectedBuilding, selectedFloor, cameraRef, onUserLocation, onHeadingChange, onBuildingPress, onRoomPress, onRouteInfo, onFollowStateChange, navigateMode }, ref) {
     const mapRef = useRef<Mapbox.MapView>(null);
     const [geojsonUri, setGeojsonUri] = useState<string | null>(null);
     const [buildingsUri, setBuildingsUri] = useState<string | null>(null);
@@ -115,6 +132,18 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
     const routeRef = useRef(route);
     useEffect(() => { routeRef.current = route; }, [route]);
 
+    // Whether the user panned away from the follow camera during navigation.
+    const [followDisengaged, setFollowDisengaged] = useState(false);
+    const followDisengagedRef = useRef(false);
+    const onFollowStateChangeRef = useRef(onFollowStateChange);
+    useEffect(() => { onFollowStateChangeRef.current = onFollowStateChange; });
+    const setDisengaged = (v: boolean) => {
+      if (followDisengagedRef.current === v) return;
+      followDisengagedRef.current = v;
+      setFollowDisengaged(v);
+      onFollowStateChangeRef.current?.(v);
+    };
+
     useImperativeHandle(ref, () => ({
       zoomIn: async () => {
         const zoom = await mapRef.current?.getZoom();
@@ -125,10 +154,12 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
         if (zoom != null) cameraRef.current?.zoomTo(zoom - 1, 200);
       },
       centerOnUser: () => {
+        setDisengaged(false);
         if (userCoordsRef.current) {
           cameraRef.current?.setCamera({
             centerCoordinate: userCoordsRef.current,
-            zoomLevel: 17,
+            zoomLevel: navigateModeRef.current ? NAV_ZOOM : 17,
+            ...(navigateModeRef.current ? { pitch: NAV_PITCH, padding: NAV_PADDING } : {}),
             animationDuration: 400,
             animationMode: 'flyTo',
           });
@@ -146,21 +177,40 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
         .then((asset) => { if (asset.localUri) setBuildingsUri(asset.localUri); });
     }, []);
 
+    const wasNavigating = useRef(false);
     useEffect(() => {
       if (navigateMode && route) {
-        const coords = route.geometry.coordinates as [number, number][];
-        const lngs = coords.map((c) => c[0]);
-        const lats = coords.map((c) => c[1]);
-        const ne: [number, number] = [Math.max(...lngs), Math.max(...lats)];
-        const sw: [number, number] = [Math.min(...lngs), Math.min(...lats)];
-        cameraRef.current?.fitBounds(ne, sw, [100, 80, 240, 80], 600);
+        wasNavigating.current = true;
+        setDisengaged(false);
+        // On a real device the Camera's followUserLocation props take over.
+        // The simulator has no usable GPS, so position the nav camera manually
+        // at the seeded origin, headed along the first route segment.
+        if (isSimulator) {
+          const coords = route.geometry.coordinates as [number, number][];
+          const origin = userCoordsRef.current ?? coords[0];
+          const next = coords.find((c) => c[0] !== origin[0] || c[1] !== origin[1]) ?? coords[coords.length - 1];
+          cameraRef.current?.setCamera({
+            centerCoordinate: origin,
+            zoomLevel: NAV_ZOOM,
+            pitch: NAV_PITCH,
+            heading: segmentBearing(origin, next),
+            padding: NAV_PADDING,
+            animationMode: 'flyTo',
+            animationDuration: 800,
+          });
+        }
         setRemainingRoute({ type: 'Feature', properties: {}, geometry: route.geometry });
         setWalkedRoute(null);
       } else if (!navigateMode) {
         setWalkedRoute(null);
         setRemainingRoute(null);
+        if (wasNavigating.current) {
+          wasNavigating.current = false;
+          setDisengaged(false);
+          cameraRef.current?.setCamera({ pitch: 0, heading: 0, animationDuration: 500 });
+        }
       }
-    }, [navigateMode, route, cameraRef]);
+    }, [navigateMode, route, cameraRef, isSimulator]);
 
     useEffect(() => {
       if (!selectedRoom || !token) {
@@ -285,9 +335,26 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
           scaleBarEnabled={false}
           attributionEnabled={false}
           logoEnabled={false}
-          onCameraChanged={(state) => onHeadingChange?.(state.properties.heading ?? 0)}
+          onCameraChanged={(state) => {
+            onHeadingChange?.(state.properties.heading ?? 0);
+            if (state.gestures.isGestureActive && navigateModeRef.current) setDisengaged(true);
+          }}
         >
-          <Mapbox.Camera ref={cameraRef} bounds={CAMPUS_BOUNDS} animationDuration={0} maxBounds={MAX_BOUNDS} minZoomLevel={7} />
+          <Mapbox.Camera
+            ref={cameraRef}
+            bounds={CAMPUS_BOUNDS}
+            animationDuration={0}
+            maxBounds={MAX_BOUNDS}
+            minZoomLevel={7}
+            followUserLocation={Boolean(navigateMode) && !isSimulator && !followDisengaged}
+            onUserTrackingModeChange={(e) => {
+              if (navigateModeRef.current && !e.nativeEvent.payload.followUserLocation) setDisengaged(true);
+            }}
+            followUserMode={UserTrackingMode.FollowWithCourse}
+            followPitch={NAV_PITCH}
+            followZoomLevel={NAV_ZOOM}
+            followPadding={NAV_PADDING}
+          />
 
           {buildingsUri && (
             <Mapbox.ShapeSource
@@ -306,7 +373,8 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
                 aboveLayerID="building"
                 style={{
                   fillColor: ['case', ['==', ['get', 'Building'], activeBldgNo ?? '__none__'], colors.limestone, colors.shade] as any,
-                  fillOpacity: ['case', ['==', ['get', 'Building'], activeBldgNo ?? '__none__'], 1, 0.7] as any,
+                  // Hidden during navigation — the 3D extrusions replace them.
+                  fillOpacity: navigateMode ? 0 : ['case', ['==', ['get', 'Building'], activeBldgNo ?? '__none__'], 1, 0.7] as any,
                 }}
               />
               <Mapbox.LineLayer
@@ -315,7 +383,7 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
                 style={{
                   lineColor: ['case', ['==', ['get', 'Building'], activeBldgNo ?? '__none__'], colors.burntOrange, colors.blueBonnet] as any,
                   lineWidth: ['case', ['==', ['get', 'Building'], activeBldgNo ?? '__none__'], 2.5, 1] as any,
-                  lineOpacity: 0.9,
+                  lineOpacity: navigateMode ? 0 : 0.9,
                 }}
               />
             </Mapbox.ShapeSource>
@@ -439,13 +507,33 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
               />
             </Mapbox.ShapeSource>
           )}
+          {/* Navigate mode — 3D building extrusions from the style's own
+              (OSM-derived) building footprints, citywide. */}
+          {navigateMode && (
+            <Mapbox.FillExtrusionLayer
+              id="buildings-3d"
+              sourceID="composite"
+              sourceLayerID="building"
+              filter={['==', ['get', 'extrude'], 'true']}
+              minZoomLevel={15}
+              maxZoomLevel={22}
+              style={{
+                fillExtrusionHeight: ['get', 'height'] as any,
+                fillExtrusionBase: ['get', 'min_height'] as any,
+                fillExtrusionColor: colors.limestone,
+                fillExtrusionOpacity: 0.75,
+              }}
+            />
+          )}
+
           {navigateMode && remainingRoute && (
             <Mapbox.ShapeSource id="route-remaining" shape={remainingRoute}>
               <Mapbox.LineLayer
                 id="route-remaining-line"
                 style={{
                   lineColor: colors.blueBonnet,
-                  lineWidth: 4,
+                  // Wider at nav zoom — the tilted camera views it at a grazing angle.
+                  lineWidth: ['interpolate', ['linear'], ['zoom'], 15, 4, 19, 9] as any,
                   lineOpacity: 0.85,
                   lineCap: 'round',
                   lineJoin: 'round',
@@ -459,11 +547,28 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
                 id="route-walked-line"
                 style={{
                   lineColor: colors.blueBonnet,
-                  lineWidth: 4,
+                  lineWidth: ['interpolate', ['linear'], ['zoom'], 15, 3, 19, 7] as any,
                   lineOpacity: 0.4,
                   lineCap: 'butt',
                   lineJoin: 'round',
                   lineDasharray: [2, 2],
+                }}
+              />
+            </Mapbox.ShapeSource>
+          )}
+          {navigateMode && selectedRoom && (
+            <Mapbox.ShapeSource
+              id="nav-destination"
+              shape={{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: selectedRoom.center } }}
+            >
+              <Mapbox.CircleLayer
+                id="nav-destination-dot"
+                style={{
+                  circleRadius: 8,
+                  circleColor: colors.burntOrange,
+                  circleStrokeColor: colors.white,
+                  circleStrokeWidth: 2.5,
+                  circlePitchAlignment: 'map',
                 }}
               />
             </Mapbox.ShapeSource>

@@ -7,6 +7,7 @@ module.exports = ({ config }) => ({
   slug: 'utclassfinder',
   scheme: 'utclassfinder', // OAuth redirect: utclassfinder://redirect
   version: '0.1.0',
+  icon: './assets/Visuals/icon.png',
   orientation: 'portrait',
   userInterfaceStyle: 'automatic',
   newArchEnabled: true,

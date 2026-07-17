@@ -2,12 +2,14 @@ import Constants from 'expo-constants';
 import React, { useState } from 'react';
 import {
   ActivityIndicator,
+  Image,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import Logo from '../assets/Visuals/logo.svg';
 import { useAuth } from '../src/auth/AuthContext';
 import { colors, radius, spacing } from '../src/theme';
 
@@ -33,8 +35,8 @@ export default function Login() {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.hero}>
-        <Text style={styles.wordmark}>UT Class Finder</Text>
-        <Text style={styles.tagline}>Type a room code. Get there on time.</Text>
+        <Logo width={210} height={72} />
+        <Text style={styles.tagline}>Navigate UT Austin Campus</Text>
       </View>
 
       <View style={styles.footer}>
@@ -57,6 +59,13 @@ export default function Login() {
           </Text>
         )}
         {error && <Text style={styles.error}>{error}</Text>}
+
+        <Image
+          source={require('../assets/Visuals/cola.png')}
+          style={styles.colaLogo}
+          resizeMode="contain"
+          accessibilityLabel="Texas Liberal Arts"
+        />
       </View>
     </SafeAreaView>
   );
@@ -64,11 +73,11 @@ export default function Login() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg, padding: spacing.lg },
-  hero: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  wordmark: { fontSize: 34, fontWeight: '800', color: colors.burntOrange },
-  tagline: { marginTop: spacing.sm, fontSize: 16, color: colors.slate },
-  footer: { gap: spacing.md },
+  hero: { flex: 1, alignItems: 'center', paddingTop: 96, gap: spacing.xl },
+  tagline: { fontSize: 16, color: colors.mist },
+  footer: { gap: spacing.md, alignItems: 'center' },
   button: {
+    alignSelf: 'stretch',
     backgroundColor: colors.burntOrange,
     paddingVertical: spacing.md,
     borderRadius: radius.md,
@@ -78,4 +87,5 @@ const styles = StyleSheet.create({
   buttonText: { color: colors.white, fontSize: 17, fontWeight: '700' },
   note: { color: colors.mist, fontSize: 13, textAlign: 'center' },
   error: { color: '#C0392B', fontSize: 14, textAlign: 'center' },
+  colaLogo: { width: 96, height: 74, marginTop: spacing.sm },
 });

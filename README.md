@@ -18,6 +18,10 @@ MVP scaffold. What works today:
 - Room-code search with normalization and autocomplete over all 538 buildings.
 - Result screen with a Mapbox map highlighting the building footprint, plus
   Get Directions handoff to Apple/Google Maps.
+- Branded UI: Classroom Finder logos on the login screen and app header, Texas
+  Liberal Arts footer, custom app icon (assets in `assets/Visuals/`).
+- **3D walking navigation** ("Walk here"): tilted follow camera, 3D building
+  extrusions, live route with a re-center chip — see `TECHNICAL.md`.
 
 Known limitation: the bundled dataset has **building footprints only — no
 room numbers**. Every search currently resolves to the building, and directions
@@ -34,6 +38,7 @@ go to the building. Adding room-level lookup needs a separate data source (see
 | Auth | `expo-auth-session` (OAuth 2.0 / OIDC + PKCE, system browser) |
 | Secure storage | `expo-secure-store` (Keychain / Keystore) |
 | Location | `expo-location` |
+| SVG assets | `react-native-svg` + `react-native-svg-transformer` (`.svg` imports as components) |
 
 ## Getting started
 
@@ -82,7 +87,13 @@ src/
 scripts/
   build-buildings.mjs    GeoJSON -> slim buildings.json
 assets/data/buildings.json  bundled dataset (generated)
+assets/Visuals/          brand assets: logo.svg, header.svg, cola.png,
+                         cola-footer.png, icon.png (app icon)
+svg.d.ts                 TypeScript declarations for .svg imports
 ```
+
+`.svg` files import as React components — wired up in `metro.config.js` via
+`react-native-svg-transformer`, typed by `svg.d.ts`.
 
 ## Authentication
 

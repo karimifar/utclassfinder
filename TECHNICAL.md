@@ -13,6 +13,12 @@ Expo + React Native app for finding rooms on the UT Austin campus. Students type
 | Map | `@rnmapbox/maps` v10 (native Mapbox GL) |
 | Auth | `expo-auth-session` (OAuth 2.0 / OIDC + PKCE) |
 | Secure storage | `expo-secure-store` (Keychain / Keystore) |
+| SVG assets | `react-native-svg` + `react-native-svg-transformer` |
+
+`.svg` files import as React components (`import Logo from '.../logo.svg'`).
+The transformer is registered in `metro.config.js`; `svg.d.ts` provides the
+TypeScript module declaration. Adding `react-native-svg` was a native change —
+rebuild the dev client after a fresh checkout (`npx expo run:ios`).
 
 ---
 
@@ -44,6 +50,14 @@ assets/data/
   buildings_rooms.geojson 54 k room polygons, sourced from UT Facilities
   room-index.json         ~36.7 k searchable rooms, generated (do not edit by hand)
   campus_buildings.geojson 231 official building footprints, sourced from ArcGIS
+
+assets/Visuals/
+  logo.svg                Classroom Finder lockup (login hero)
+  header.svg              Classroom Finder wordmark (app header)
+  cola.png                Texas Liberal Arts lockup (login footer)
+  cola-footer.png         Texas Liberal Arts horizontal lockup (screen footer)
+  icon.png                1024×1024 app icon (referenced by app.config.js `icon`;
+                          also baked into ios/.../AppIcon.appiconset)
 
 scripts/
   build-buildings.mjs     Generates buildings.json from buildings_rooms.geojson
@@ -203,7 +217,8 @@ Building/Room state:
 export interface CampusMapHandle {
   zoomIn: () => void;      // increments zoom by 1
   zoomOut: () => void;     // decrements zoom by 1
-  centerOnUser: () => void; // flies to last known GPS location at zoom 17
+  centerOnUser: () => void; // flies to last known GPS location at zoom 17;
+                            // during navigate mode: nav zoom/pitch + re-engages follow
 }
 ```
 
@@ -220,6 +235,10 @@ interface Props {
   onUserLocation?: (coords: [number, number]) => void;  // fires on GPS update
   onHeadingChange?: (heading: number) => void;          // fires on every camera move
   onBuildingPress?: (buildingId: string) => void;       // fires when footprint tapped at zoom ≥ 15
+  onRoomPress?: (roomId: string) => void;               // fires when a floor-plan room is tapped
+  onRouteInfo?: (info: { distance; duration } | null) => void;  // walking route fetched/cleared
+  onFollowStateChange?: (disengaged: boolean) => void;  // nav follow camera lost/regained (drives Re-center chip)
+  navigateMode?: boolean;              // true while "Walk here" navigation is active
 }
 ```
 
@@ -278,6 +297,8 @@ Labels and building tap activation both begin at zoom 15.
 | Building selected | `setCamera({ center: building.center, zoom: 17, flyTo, padding: FOCUS_PADDING })` |
 | Back / X pressed → zero state | `setCamera({ zoom: currentZoom − 1.5, padding: NO_PADDING })` |
 | Initial mount (both null) | No imperative call — declarative `bounds` prop handles it |
+| Navigate mode entered | Follow camera (device) or manual nav camera (simulator) — see [3D walking navigation](#3d-walking-navigation-navigate-mode) |
+| Navigate mode exited | `setCamera({ pitch: 0, heading: 0 })` — flattens back; guarded by `wasNavigating` ref |
 
 `hasHadSelection` ref prevents the zoom-out from firing on initial mount.
 
@@ -292,6 +313,73 @@ Tapping a `campus-buildings` polygon at zoom ≥ 15 calls `onBuildingPress(build
 ### Compass and heading
 
 `onCameraChanged` fires on every camera move and reports `state.properties.heading`. This is passed to `search.tsx` via `onHeadingChange`, which drives the rotation of the `N` compass button: `transform: [{ rotate: '${-heading}deg' }]`. Tapping the button calls `cameraRef.current?.setCamera({ heading: 0 })` to reset north.
+
+---
+
+## 3D walking navigation (navigate mode)
+
+Tapping **Walk here** on the room panel sets `navigateMode` and switches the map into a Google-Maps-style first-person view. Constants in `CampusMap.tsx`: `NAV_PITCH = 60`, `NAV_ZOOM = 18`, `NAV_PADDING` (bottom padding = 35% of screen height, so the puck sits low with the route ahead).
+
+### Route
+
+When a room is selected (any state, not just navigation), `CampusMap` fetches a walking route from the Mapbox Directions API (`mapbox/walking` profile) from the user's location to `room.center`, reporting `{distance, duration}` up via `onRouteInfo`. In navigate mode the route splits into two lines as the user moves (`splitRouteAtUser`):
+
+```
+route-remaining-line   solid blueBonnet, width interpolated zoom 15→19 : 4→9px
+route-walked-line      dashed blueBonnet at 40% opacity, width 3→7px
+nav-destination-dot    burnt orange circle, white stroke (room center)
+```
+
+### Camera
+
+- **Real device:** declarative follow props on the Camera — `followUserLocation` + `UserTrackingMode.FollowWithCourse` (heading-up) + `followPitch`/`followZoomLevel`/`followPadding`. Mapbox drives the camera from GPS.
+- **Simulator:** GPS is unusable (reports San Francisco; a campus coordinate is seeded), so navigate mode positions the camera manually: seeded origin, `NAV_PITCH`, heading = bearing of the first route segment (`segmentBearing`).
+- **Exit:** pitch and heading animate back to 0. The `wasNavigating` ref prevents this from firing on mount.
+
+### 3D buildings
+
+A `FillExtrusionLayer` (`buildings-3d`) renders only during navigate mode, sourced from the Light style's own `composite` / `building` source-layer (OSM-derived `height` / `min_height` attributes, citywide). Extrusions draw at 75% opacity so route segments behind buildings stay faintly visible. The flat `building-fill` / `building-outline` layers set opacity 0 while navigating to avoid z-fighting.
+
+### Follow disengagement + Re-center chip
+
+Panning the map during navigation disengages the follow camera. Two detection paths in `CampusMap.tsx`, both feeding `setDisengaged`:
+
+1. `onUserTrackingModeChange` on the Camera — native follow mode ended (real device)
+2. `gestures.isGestureActive` in `onCameraChanged` — any user gesture during navigation (works on simulator)
+
+The state gates the `followUserLocation` prop (so clearing it re-engages follow) and is reported to `search.tsx` via `onFollowStateChange`, which shows the **Re-center** chip above the nav bar. The chip calls `centerOnUser()`, which clears the disengaged state and restores the nav camera. State resets automatically on nav enter/exit.
+
+### Nav UI (`search.tsx`)
+
+The room panel is replaced by a compact nav bar: bearing arrow (rotates toward the destination from `bearing(userCoords, room.center)`), destination, live ETA/distance, and an **End** button that exits navigate mode.
+
+---
+
+## Screen chrome (`app/search.tsx`, `app/login.tsx`)
+
+### Custom header
+
+The search screen renders its own header instead of the native stack header (`headerShown: false` in `_layout.tsx`). Reason: iOS 26 wraps native `headerLeft`/`headerTitle` items in a tinted "liquid glass" capsule with a shadow and press animation, which distorts the logo. The custom header is a white absolute-positioned overlay containing:
+
+```
+logo row (44pt)    header.svg wordmark left · sign-out icon right
+                   (sign-out is an inline react-native-svg log-out glyph)
+search bar (48pt)  bgSubtle fill + hairline border (no floating shadow)
+```
+
+`headerHeight = insets.top + 44 + spacing.sm + 48 + spacing.sm` — the results dropdown (`dropdownTop`) and map toolbar (`toolbarTop`) anchor below it.
+
+### Footer
+
+Thin branded strip pinned to the bottom: `cola-footer.png` (Texas Liberal Arts lockup) centered at 16pt tall. `footerHeight = insets.bottom + 32 + spacing.sm`, with `paddingTop: spacing.sm` for breathing room above the logo and `paddingBottom: insets.bottom` to clear the home indicator. All bottom-anchored UI (floor switcher, room panel, nav bar, Re-center chip) anchors to `panelBottom = footerHeight + spacing.sm` so nothing overlaps the footer.
+
+### Login screen (`app/login.tsx`)
+
+`logo.svg` lockup + tagline in the upper hero area, sign-in button near the bottom, `cola.png` centered beneath it. Sign-out lives in the header (no bottom sign-out button).
+
+### App icon
+
+`assets/Visuals/icon.png` (1024×1024), declared as `icon` in `app.config.js` (source of truth for prebuild/EAS) and mirrored into `ios/UTClassFinder/Images.xcassets/AppIcon.appiconset/`.
 
 ---
 
@@ -318,7 +406,7 @@ This means searching directly for a room (bypassing building state) still shows 
 ### Room state (room selected)
 - `←` back + building chip + `✕` dismiss in search bar; room number in text input
 - Map: floor plan of room's floor; selected room in solid burnt orange with white bold label
-- **Room info panel** at bottom: building badge + room number + building name + floor + Navigate here CTA
+- **Room info panel** at bottom: building badge + room number + building name + floor + walking ETA + **Walk here** (3D navigate mode) and **Open in Maps** CTAs
 - Building footprint still highlighted in selected style
 
 ### Button behavior

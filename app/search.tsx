@@ -2,6 +2,7 @@ import Mapbox from '@rnmapbox/maps';
 import React, { useMemo, useRef, useState } from 'react';
 import {
   FlatList,
+  Image,
   Keyboard,
   Pressable,
   ScrollView,
@@ -11,6 +12,8 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Svg, { Path } from 'react-native-svg';
+import HeaderLogo from '../assets/Visuals/header.svg';
 import { useAuth } from '../src/auth/AuthContext';
 import { formatFloor, getBuildingById, sortedFloors } from '../src/data/buildings';
 import { getRoomById, getRoomsInBuilding, parseRoomCode, searchBuildings, searchRooms } from '../src/data/search';
@@ -38,6 +41,7 @@ export default function Search() {
   const [routeInfo, setRouteInfo] = useState<{ distance: number; duration: number } | null>(null);
   const [navigateMode, setNavigateMode] = useState(false);
   const [userCoords, setUserCoords] = useState<[number, number] | null>(null);
+  const [followLost, setFollowLost] = useState(false);
 
   const items: AutocompleteItem[] = useMemo(() => {
     if (selectedBuilding) {
@@ -137,9 +141,15 @@ export default function Search() {
 
   const activeBuilding = selectedBuilding ?? selectedRoom?.building ?? null;
   const inBuildingOrRoomState = activeBuilding !== null;
-  const searchBarTop = Math.round(insets.top / 2);
-  const dropdownTop = searchBarTop + 52;
-  const toolbarTop = searchBarTop + 48 + spacing.sm;
+  // Header stacks the logo row (44) and search bar (48) on one white surface,
+  // with spacing.sm between them and below the search bar.
+  const headerHeight = insets.top + 44 + spacing.sm + 48 + spacing.sm;
+  // Thin branded footer; panels and the nav bar float just above it.
+  // Extra spacing.sm of breathing room above the logo.
+  const footerHeight = insets.bottom + 32 + spacing.sm;
+  const panelBottom = footerHeight + spacing.sm;
+  const dropdownTop = headerHeight + spacing.xs;
+  const toolbarTop = headerHeight + spacing.sm;
   const floors = selectedBuilding ? sortedFloors(selectedBuilding.floors) : [];
 
   return (
@@ -155,8 +165,69 @@ export default function Search() {
         onRoomPress={handleRoomPress}
         onRouteInfo={setRouteInfo}
         onUserLocation={setUserCoords}
+        onFollowStateChange={setFollowLost}
         navigateMode={navigateMode}
       />
+
+      {/* App header — replaces the native stack header so the logo renders
+          flat: no glass capsule, shadow, tint, or press effect. Contains the
+          logo row (sign-out on the right) and the search bar. */}
+      <View style={[styles.header, { height: headerHeight, paddingTop: insets.top }]}>
+        <View style={styles.logoRow}>
+          <HeaderLogo width={158} height={22} />
+          <Pressable onPress={signOut} hitSlop={8} accessibilityLabel="Sign out">
+            {({ pressed }) => (
+              <Svg width={22} height={22} viewBox="0 0 24 24">
+                <Path
+                  d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"
+                  stroke={pressed ? colors.ink : colors.slate}
+                  strokeWidth={2}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  fill="none"
+                />
+              </Svg>
+            )}
+          </Pressable>
+        </View>
+
+        <View style={styles.searchBar}>
+          {inBuildingOrRoomState ? (
+            <Pressable onPress={handleBack} hitSlop={8} style={styles.backBtn}>
+              <Text style={styles.backBtnText}>←</Text>
+            </Pressable>
+          ) : (
+            <Text style={styles.searchIcon}>⌕</Text>
+          )}
+
+          {inBuildingOrRoomState && (
+            <View style={styles.buildingChip}>
+              <Text style={styles.buildingChipText}>{activeBuilding!.abbr}</Text>
+            </View>
+          )}
+
+          <TextInput
+            style={styles.input}
+            placeholder={inBuildingOrRoomState
+              ? `Rooms in ${activeBuilding!.abbr}…`
+              : 'Building or room, e.g. GDC 2.216'}
+            placeholderTextColor={colors.mist}
+            autoCapitalize="characters"
+            autoCorrect={false}
+            value={query}
+            onChangeText={handleChange}
+            onFocus={() => setShowResults(true)}
+            returnKeyType="search"
+            onSubmitEditing={() => items[0] && handleSelect(items[0])}
+          />
+
+          {(query.length > 0 || selectedRoom !== null) && (
+            <Pressable onPress={handleClearQuery} hitSlop={8}>
+              <Text style={styles.clearBtn}>✕</Text>
+            </Pressable>
+          )}
+        </View>
+      </View>
 
       {/* Map toolbar — zoom, location, compass */}
       <View style={[styles.toolbar, { top: toolbarTop }]}>
@@ -181,44 +252,6 @@ export default function Search() {
         >
           <Text style={[styles.toolBtnText, { transform: [{ rotate: `${-mapHeading}deg` }] }]}>N</Text>
         </Pressable>
-      </View>
-
-      {/* Floating search bar */}
-      <View style={[styles.searchBar, { top: searchBarTop }]}>
-        {inBuildingOrRoomState ? (
-          <Pressable onPress={handleBack} hitSlop={8} style={styles.backBtn}>
-            <Text style={styles.backBtnText}>←</Text>
-          </Pressable>
-        ) : (
-          <Text style={styles.searchIcon}>⌕</Text>
-        )}
-
-        {inBuildingOrRoomState && (
-          <View style={styles.buildingChip}>
-            <Text style={styles.buildingChipText}>{activeBuilding!.abbr}</Text>
-          </View>
-        )}
-
-        <TextInput
-          style={styles.input}
-          placeholder={inBuildingOrRoomState
-            ? `Rooms in ${activeBuilding!.abbr}…`
-            : 'Building or room, e.g. GDC 2.216'}
-          placeholderTextColor={colors.mist}
-          autoCapitalize="characters"
-          autoCorrect={false}
-          value={query}
-          onChangeText={handleChange}
-          onFocus={() => setShowResults(true)}
-          returnKeyType="search"
-          onSubmitEditing={() => items[0] && handleSelect(items[0])}
-        />
-
-        {(query.length > 0 || selectedRoom !== null) && (
-          <Pressable onPress={handleClearQuery} hitSlop={8}>
-            <Text style={styles.clearBtn}>✕</Text>
-          </Pressable>
-        )}
       </View>
 
       {/* Results dropdown — hidden in building state; floor switcher panel handles navigation there */}
@@ -282,7 +315,7 @@ export default function Search() {
 
       {/* Building state — floor switcher panel */}
       {selectedBuilding && !selectedRoom && floors.length > 0 && (
-        <View style={[styles.bottomPanel, { bottom: insets.bottom + spacing.md }]}>
+        <View style={[styles.bottomPanel, { bottom: panelBottom }]}>
           <View style={styles.panelHeader}>
             <View style={styles.panelBadge}>
               <Text style={styles.panelBadgeText}>{selectedBuilding.abbr}</Text>
@@ -316,7 +349,7 @@ export default function Search() {
 
       {/* Room state — info panel with two CTAs */}
       {selectedRoom && !navigateMode && (
-        <View style={[styles.bottomPanel, { bottom: insets.bottom + spacing.md }]}>
+        <View style={[styles.bottomPanel, { bottom: panelBottom }]}>
           <View style={styles.panelHeader}>
             <View style={styles.panelBadge}>
               <Text style={styles.panelBadgeText}>{selectedRoom.building.abbr}</Text>
@@ -354,7 +387,7 @@ export default function Search() {
 
       {/* Navigate mode — compact bar with bearing arrow and ETA */}
       {selectedRoom && navigateMode && (
-        <View style={[styles.navBar, { bottom: insets.bottom + spacing.md }]}>
+        <View style={[styles.navBar, { bottom: panelBottom }]}>
           <View style={styles.navArrowWrap}>
             <Text style={[
               styles.navArrow,
@@ -377,16 +410,29 @@ export default function Search() {
         </View>
       )}
 
-      {/* Sign out — only visible in default state so it doesn't clash with panels */}
-      {!inBuildingOrRoomState && (
+      {/* Re-center chip — panning during navigation disengages the follow camera */}
+      {selectedRoom && navigateMode && followLost && (
         <Pressable
-          onPress={signOut}
-          style={[styles.signOut, { bottom: insets.bottom + spacing.md }]}
-          hitSlop={8}
+          style={({ pressed }) => [
+            styles.recenterChip,
+            { bottom: panelBottom + 76 + spacing.sm },
+            pressed && styles.recenterChipPressed,
+          ]}
+          onPress={() => mapHandle.current?.centerOnUser()}
         >
-          <Text style={styles.signOutText}>Sign out</Text>
+          <Text style={styles.recenterChipText}>Re-center</Text>
         </Pressable>
       )}
+
+      {/* Branded footer */}
+      <View style={[styles.footer, { height: footerHeight, paddingTop: spacing.sm, paddingBottom: insets.bottom }]}>
+        <Image
+          source={require('../assets/Visuals/cola-footer.png')}
+          style={styles.footerLogo}
+          resizeMode="contain"
+          accessibilityLabel="Texas Liberal Arts"
+        />
+      </View>
     </View>
   );
 }
@@ -409,22 +455,32 @@ function titleCase(s: string | null): string {
 const styles = StyleSheet.create({
   container: { flex: 1 },
 
-  searchBar: {
+  header: {
     position: 'absolute',
-    left: spacing.md,
-    right: spacing.md,
+    top: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: colors.white,
+    paddingHorizontal: spacing.md,
+    gap: spacing.sm,
+  },
+  logoRow: {
+    height: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+
+  searchBar: {
     height: 48,
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: spacing.md,
-    backgroundColor: colors.white,
+    backgroundColor: colors.bgSubtle,
+    borderWidth: 1,
+    borderColor: colors.line,
     borderRadius: radius.md,
     gap: spacing.sm,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 6,
-    elevation: 4,
   },
   searchIcon: { fontSize: 18, color: colors.mist },
   backBtn: { justifyContent: 'center' },
@@ -599,11 +655,32 @@ const styles = StyleSheet.create({
   },
   navEndText: { fontSize: 14, fontWeight: '600', color: colors.slate },
 
-  signOut: {
+  recenterChip: {
     position: 'absolute',
     alignSelf: 'center',
+    backgroundColor: colors.white,
+    borderRadius: 20,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 6,
+    elevation: 4,
   },
-  signOutText: { color: colors.white, fontSize: 13, opacity: 0.7 },
+  recenterChipPressed: { backgroundColor: colors.bgSubtle },
+  recenterChipText: { color: colors.burntOrange, fontSize: 14, fontWeight: '700' },
+
+  footer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: colors.white,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  footerLogo: { width: 167, height: 16 },
 
   toolbar: {
     position: 'absolute',
