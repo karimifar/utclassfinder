@@ -13,7 +13,6 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Path } from 'react-native-svg';
-import HeaderLogo from '../assets/Visuals/header.svg';
 import { useAuth } from '../src/auth/AuthContext';
 import { formatFloor, getBuildingById, sortedFloors } from '../src/data/buildings';
 import { getRoomById, getRoomsInBuilding, parseRoomCode, searchBuildings, searchRooms } from '../src/data/search';
@@ -174,7 +173,12 @@ export default function Search() {
           logo row (sign-out on the right) and the search bar. */}
       <View style={[styles.header, { height: headerHeight, paddingTop: insets.top }]}>
         <View style={styles.logoRow}>
-          <HeaderLogo width={158} height={22} />
+          <Image
+            source={require('../assets/Visuals/header.png')}
+            style={styles.headerLogo}
+            resizeMode="contain"
+            accessibilityLabel="Classroom Finder"
+          />
           <Pressable onPress={signOut} hitSlop={8} accessibilityLabel="Sign out">
             {({ pressed }) => (
               <Svg width={22} height={22} viewBox="0 0 24 24">
@@ -470,6 +474,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
+  headerLogo: { width: 158, height: 25 },
 
   searchBar: {
     height: 48,

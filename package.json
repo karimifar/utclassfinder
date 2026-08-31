@@ -20,6 +20,7 @@
     "expo-auth-session": "~6.2.0",
     "expo-constants": "~17.1.0",
     "expo-crypto": "~14.1.0",
+    "expo-dev-client": "~5.2.4",
     "expo-file-system": "^18.1.11",
     "expo-font": "^13.3.2",
     "expo-keep-awake": "^14.1.4",

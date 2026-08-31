@@ -9,7 +9,6 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import Logo from '../assets/Visuals/logo.svg';
 import { useAuth } from '../src/auth/AuthContext';
 import { colors, radius, spacing } from '../src/theme';
 
@@ -35,7 +34,12 @@ export default function Login() {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.hero}>
-        <Logo width={210} height={72} />
+        <Image
+          source={require('../assets/Visuals/logo.png')}
+          style={styles.logo}
+          resizeMode="contain"
+          accessibilityLabel="Classroom Finder"
+        />
         <Text style={styles.tagline}>Navigate UT Austin Campus</Text>
       </View>
 
@@ -74,6 +78,7 @@ export default function Login() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg, padding: spacing.lg },
   hero: { flex: 1, alignItems: 'center', paddingTop: 96, gap: spacing.xl },
+  logo: { width: 210, height: 73 },
   tagline: { fontSize: 16, color: colors.mist },
   footer: { gap: spacing.md, alignItems: 'center' },
   button: {

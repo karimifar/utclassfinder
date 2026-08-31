@@ -483,14 +483,47 @@ colors = {
 
 ## Authentication (`src/auth/AuthContext.tsx`)
 
-UT EID login via OAuth 2.0 / OIDC with PKCE in the system browser.
+UT EID login via OIDC authorization code + PKCE in the system browser.
 
 - `UT_OAUTH_ENABLED=false` → mock session, 8-hour expiry, app fully usable
 - `UT_OAUTH_ENABLED=true` → real UT SSO flow via `expo-auth-session`
 
-Session is stored in device keychain (`expo-secure-store`). Redirect URI: `utclassfinder://redirect` — must be registered with UT ITS.
+Session is stored in device keychain (`expo-secure-store`).
 
-**Open item:** UT ITS has not yet provisioned the OAuth client. Endpoints and client ID are placeholders in `.env`.
+### Registered client (UT IAM)
+
+| Field | Value |
+|---|---|
+| `client_id` | `cola-class-finder-oidc` |
+| `client_secret` | *(none — public native client)* |
+| `token_endpoint_auth_method` | `none` |
+| `grant_types` | `authorization_code` |
+| `response_types` | `code` |
+| `scope` | `openid profile utexas_profile` |
+| `redirect_uris` | `utclassfinder://redirect` |
+| `post_logout_redirect_uris` | *(none)* |
+
+Because there is no client secret, **PKCE is the only thing binding the token exchange to this app** — `usePKCE: true` in `AuthRequest` is not optional.
+
+### Endpoints
+
+UT Enterprise Authentication runs Shibboleth IdP with the OIDC OP plugin. Defaults live in `app.config.js` and can be overridden per-environment in `.env`:
+
+| Endpoint | URL |
+|---|---|
+| Issuer | `https://enterprise.login.utexas.edu` |
+| Authorization | `https://enterprise.login.utexas.edu/idp/profile/oidc/authorize` |
+| Token | `https://enterprise.login.utexas.edu/idp/profile/oidc/token` |
+| UserInfo | `https://enterprise.login.utexas.edu/idp/profile/oidc/userinfo` |
+
+### Identity
+
+The EID comes from decoding the `id_token` returned by the token endpoint (`decodeJwtPayload` / `eidFromClaims` in `AuthContext.tsx`). Claim names vary by IdP release policy, so we try `eid` → `utexasEduPersonEid` → `uid` → `preferred_username` → `sub` and fall back to the literal `"UT EID"`. The signature is **not** verified on-device — the token arrives over TLS straight from the token endpoint, and anything security-sensitive must be re-verified server-side.
+
+### Notes
+
+- No `post_logout_redirect_uris` are registered, so `signOut()` clears the local keychain session only. The IdP browser session persists; the next sign-in may complete without a password prompt. Ask IAM to register a logout redirect if true single-logout is needed.
+- Expo Go cannot receive `utclassfinder://redirect` — testing SSO requires a dev client build.
 
 ---
 
@@ -501,9 +534,14 @@ Session is stored in device keychain (`expo-secure-store`). Redirect URI: `utcla
 | `MAPBOX_ACCESS_TOKEN` | Public token (`pk...`), runtime map rendering |
 | `MAPBOX_DOWNLOAD_TOKEN` | Secret token (`sk...`), build-time SDK download only |
 | `UT_OAUTH_ENABLED` | `"true"` / `"false"` |
-| `UT_OAUTH_CLIENT_ID` | From UT ITS |
-| `UT_OAUTH_AUTHORIZATION_ENDPOINT` | OIDC authorization endpoint |
-| `UT_OAUTH_TOKEN_ENDPOINT` | OIDC token endpoint |
+| `UT_OAUTH_CLIENT_ID` | UT IAM client ID (default `cola-class-finder-oidc`) |
+| `UT_OAUTH_ISSUER` | OIDC issuer base URL |
+| `UT_OAUTH_AUTHORIZATION_ENDPOINT` | Override for the authorization endpoint |
+| `UT_OAUTH_TOKEN_ENDPOINT` | Override for the token endpoint |
+| `UT_OAUTH_USERINFO_ENDPOINT` | Override for the userinfo endpoint |
+| `UT_OAUTH_SCOPES` | Space-separated scopes (default `openid profile utexas_profile`) |
+
+All `UT_OAUTH_*` values except `ENABLED` have working defaults in `app.config.js`; set them only to override.
 
 ---
 
@@ -535,5 +573,5 @@ node scripts/build-buildings.mjs assets/data/buildings_rooms.geojson
 
 ## Open items
 
-- **UT SSO:** waiting on UT ITS to provision the OAuth client and endpoints
+- **UT SSO:** client is provisioned and wired up, but untested against the live IdP. Two things to confirm with IAM before flipping `UT_OAUTH_ENABLED=true`: (1) the exact endpoint paths — the discovery document at `/.well-known/openid-configuration` was not publicly readable, so the Shibboleth defaults are inferred; (2) which claim `utexas_profile` releases the EID under.
 - **Room search scope:** `getRoomsInBuilding` uses a fixed limit of 8 for autocomplete; a larger limit or pagination could be useful if the room list grows in building state

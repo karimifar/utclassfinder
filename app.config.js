@@ -1,5 +1,9 @@
 // Expo app config. Reads secrets from the environment (.env) so nothing is
 // committed. See .env.example for the variables you need to set.
+
+// UT Enterprise Authentication (Shibboleth IdP with the OIDC OP plugin).
+const UT_OIDC_BASE = 'https://enterprise.login.utexas.edu';
+
 module.exports = ({ config }) => ({
   ...config,
   owner: 'karimifar',
@@ -14,6 +18,11 @@ module.exports = ({ config }) => ({
   ios: {
     supportsTablet: true,
     bundleIdentifier: 'edu.utexas.cola.classfinder',
+    config: {
+      // HTTPS only — exempt from export compliance. Pre-answers the encryption
+      // question App Store Connect asks on every TestFlight upload.
+      usesNonExemptEncryption: false,
+    },
   },
   android: {
     package: 'edu.utexas.cola.classfinder',
@@ -39,12 +48,22 @@ module.exports = ({ config }) => ({
   extra: {
     // Public token (pk....) used by the map at runtime.
     mapboxAccessToken: process.env.MAPBOX_ACCESS_TOKEN,
-    // UT EID / UT SSO OAuth config — fill in once UT ITS provides the endpoints.
+    // UT EID / UT SSO OIDC config. The client is registered with UT IAM as a
+    // public (native) client: no secret, PKCE required, redirect
+    // utclassfinder://redirect. Endpoints default to UT's Shibboleth OIDC OP;
+    // override via .env if IAM moves them.
     utOauth: {
       enabled: process.env.UT_OAUTH_ENABLED === 'true',
-      clientId: process.env.UT_OAUTH_CLIENT_ID,
-      authorizationEndpoint: process.env.UT_OAUTH_AUTHORIZATION_ENDPOINT,
-      tokenEndpoint: process.env.UT_OAUTH_TOKEN_ENDPOINT,
+      clientId: process.env.UT_OAUTH_CLIENT_ID || 'cola-class-finder-oidc',
+      issuer: process.env.UT_OAUTH_ISSUER || UT_OIDC_BASE,
+      authorizationEndpoint:
+        process.env.UT_OAUTH_AUTHORIZATION_ENDPOINT || `${UT_OIDC_BASE}/idp/profile/oidc/authorize`,
+      tokenEndpoint:
+        process.env.UT_OAUTH_TOKEN_ENDPOINT || `${UT_OIDC_BASE}/idp/profile/oidc/token`,
+      userInfoEndpoint:
+        process.env.UT_OAUTH_USERINFO_ENDPOINT || `${UT_OIDC_BASE}/idp/profile/oidc/userinfo`,
+      // Registered scopes. utexas_profile carries the UT EID claim.
+      scopes: (process.env.UT_OAUTH_SCOPES || 'openid profile utexas_profile').split(/[\s,]+/).filter(Boolean),
     },
     router: {},
     eas: { projectId: '756f5fba-c920-461c-978d-55a2a765fa24' },

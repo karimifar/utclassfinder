@@ -15,19 +15,68 @@ const SESSION_KEY = 'ut_session_v1';
 interface UtOauthConfig {
   enabled: boolean;
   clientId?: string;
+  issuer?: string;
   authorizationEndpoint?: string;
   tokenEndpoint?: string;
+  userInfoEndpoint?: string;
+  scopes?: string[];
 }
 
 const oauth = (Constants.expoConfig?.extra?.utOauth ?? {}) as UtOauthConfig;
+
+const DEFAULT_SCOPES = ['openid', 'profile', 'utexas_profile'];
 
 export interface Session {
   accessToken: string;
   /** Best-effort identity label for the UI. */
   eid: string;
+  /** Display name from the profile scope, when the IdP releases one. */
+  name?: string;
+  /** Raw OIDC ID token, kept for API calls that need to assert identity. */
+  idToken?: string;
   /** Epoch ms when the token expires; sessions persist until then or logout. */
   expiresAt: number | null;
   mock: boolean;
+}
+
+/**
+ * Decode a JWT payload. Claims are used only for display — the token was
+ * received over TLS directly from the token endpoint, so we do not verify the
+ * signature on-device. Anything security-sensitive must be verified server-side.
+ */
+function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
+  try {
+    const payload = jwt.split('.')[1];
+    if (!payload) return null;
+    const b64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+    const json = decodeURIComponent(
+      atob(padded)
+        .split('')
+        .map((c) => '%' + c.charCodeAt(0).toString(16).padStart(2, '0'))
+        .join(''),
+    );
+    return JSON.parse(json) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/** Pull the UT EID out of the ID token, tolerating IdP claim-name variation. */
+function eidFromClaims(claims: Record<string, unknown> | null): string {
+  if (!claims) return 'UT EID';
+  const candidates = [
+    'eid',
+    'utexasEduPersonEid',
+    'uid',
+    'preferred_username',
+    'sub',
+  ];
+  for (const key of candidates) {
+    const v = claims[key];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return 'UT EID';
 }
 
 interface AuthState {
@@ -61,26 +110,34 @@ async function saveSession(s: Session): Promise<void> {
 const redirectUri = AuthSession.makeRedirectUri({ scheme: 'utclassfinder', path: 'redirect' });
 
 /**
- * Real UT SSO OAuth 2.0 / OIDC flow with PKCE via the system browser. Used only
- * when extra.utOauth.enabled is true and the endpoints are configured. Until UT
- * ITS provisions the app this stays off and signIn() falls back to a mock.
+ * Real UT SSO OIDC flow with PKCE via the system browser. The client is
+ * registered with UT IAM as a public native client (`token_endpoint_auth_method:
+ * none`), so no secret is sent — PKCE is what proves the exchange came from us.
+ * Used only when extra.utOauth.enabled is true; otherwise signIn() mocks.
  */
 async function realSignIn(): Promise<Session> {
   const discovery: AuthSession.DiscoveryDocument = {
     authorizationEndpoint: oauth.authorizationEndpoint!,
     tokenEndpoint: oauth.tokenEndpoint!,
+    userInfoEndpoint: oauth.userInfoEndpoint,
   };
 
   const request = new AuthSession.AuthRequest({
     clientId: oauth.clientId!,
     redirectUri,
-    scopes: ['openid', 'profile'],
+    scopes: oauth.scopes?.length ? oauth.scopes : DEFAULT_SCOPES,
+    responseType: AuthSession.ResponseType.Code,
     usePKCE: true,
   });
   await request.makeAuthUrlAsync(discovery);
 
   const result = await request.promptAsync(discovery);
   if (result.type !== 'success' || !result.params.code) {
+    if (result.type === 'error') {
+      throw new Error(
+        result.params.error_description || result.params.error || 'Sign-in failed.',
+      );
+    }
     throw new Error('Sign-in was cancelled or failed.');
   }
 
@@ -96,9 +153,19 @@ async function realSignIn(): Promise<Session> {
     discovery,
   );
 
+  const claims = token.idToken ? decodeJwtPayload(token.idToken) : null;
+  if (__DEV__) {
+    // TEMP: verifying what UT's IdP actually releases under utexas_profile.
+    // Remove once eidFromClaims' candidate list is confirmed against a real token.
+    console.log('[UT SSO] raw id_token claims:', JSON.stringify(claims, null, 2));
+  }
+  const name = claims?.name;
+
   return {
     accessToken: token.accessToken,
-    eid: 'UT EID',
+    eid: eidFromClaims(claims),
+    name: typeof name === 'string' ? name : undefined,
+    idToken: token.idToken,
     expiresAt: token.expiresIn ? Date.now() + token.expiresIn * 1000 : null,
     mock: false,
   };
