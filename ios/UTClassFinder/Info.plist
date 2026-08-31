@@ -28,7 +28,7 @@
         <key>CFBundleURLSchemes</key>
         <array>
           <string>utclassfinder</string>
-          <string>edu.utexas.cola.classfinder</string>
+          <string>com.utaustin.UTClassFinder</string>
         </array>
       </dict>
       <dict>

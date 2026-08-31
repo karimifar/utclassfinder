@@ -17,7 +17,8 @@ module.exports = ({ config }) => ({
   newArchEnabled: true,
   ios: {
     supportsTablet: true,
-    bundleIdentifier: 'edu.utexas.cola.classfinder',
+    // Must match the App Store Connect app record (created by UT admin).
+    bundleIdentifier: 'com.utaustin.UTClassFinder',
     config: {
       // HTTPS only — exempt from export compliance. Pre-answers the encryption
       // question App Store Connect asks on every TestFlight upload.
@@ -25,7 +26,8 @@ module.exports = ({ config }) => ({
     },
   },
   android: {
-    package: 'edu.utexas.cola.classfinder',
+    // Kept in the same namespace as iOS; lowercase per Android convention.
+    package: 'com.utaustin.utclassfinder',
   },
   plugins: [
     'expo-router',
