@@ -1,11 +1,15 @@
 import Mapbox, { UserTrackingMode } from '@rnmapbox/maps';
 import Constants from 'expo-constants';
+import * as Location from 'expo-location';
 import { Asset } from 'expo-asset';
 import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { Dimensions, StyleSheet, Text, View } from 'react-native';
 import { BUILDINGS } from '../data/buildings';
-import type { Building, RoomMatch } from '../data/types';
+import type { Building, LngLat, RoomMatch } from '../data/types';
 import { colors } from '../theme';
+import { frameFootprint } from './framing';
+import { haversine, type RouteState } from './routeState';
+import { useWalkingRoute } from './useWalkingRoute';
 
 function splitRouteAtUser(
   coords: [number, number][],
@@ -41,6 +45,14 @@ export interface CampusMapHandle {
   centerOnUser: () => void;
 }
 
+/** Where the user is walking next, for the nav bar's arrow and arrival card. */
+export interface NavProgress {
+  /** Bearing of the route segment ahead, or null when there's no route. */
+  bearing: number | null;
+  /** Straight-line metres to the destination, or null when unknown. */
+  distanceToDestination: number | null;
+}
+
 const token = Constants.expoConfig?.extra?.mapboxAccessToken as string | undefined;
 if (token) Mapbox.setAccessToken(token);
 
@@ -51,12 +63,6 @@ const CAMPUS_BOUNDS = {
   paddingBottom: 32,
   paddingLeft: 32,
   paddingRight: 32,
-};
-
-// 200-mile radius around Austin — hard limit on how far the user can pan.
-const MAX_BOUNDS = {
-  ne: [-94.3871, 33.1658] as [number, number],
-  sw: [-101.0991, 27.3686] as [number, number],
 };
 
 const CAMPUS_BUILDINGS = BUILDINGS.filter(
@@ -84,6 +90,14 @@ const NO_PADDING   = { paddingTop: 0, paddingLeft: 0, paddingRight: 0, paddingBo
 const NAV_PADDING  = { paddingTop: 0, paddingLeft: 0, paddingRight: 0, paddingBottom: Dimensions.get('window').height * 0.35 };
 const NAV_PITCH = 60;
 const NAV_ZOOM = 18;
+const ROOM_ZOOM = 19;
+// Building state is framed to the footprint, but never outside this range:
+// 17.5 is where the floor-plan room labels switch on (see `floor-plan-labels`),
+// and past 19 a small building's floor plan is unreadably large.
+const BUILDING_MIN_ZOOM = 17.5;
+const BUILDING_MAX_ZOOM = 19.0;
+// Breathing room between the footprint and the edge of the framed area.
+const FRAME_INSET = 28;
 
 /** Bearing (degrees) of the first route segment, for the initial nav camera heading. */
 function segmentBearing(from: [number, number], to: [number, number]): number {
@@ -96,6 +110,51 @@ function segmentBearing(from: [number, number], to: [number, number]): number {
   return (Math.atan2(y, x) * 180) / Math.PI;
 }
 
+/**
+ * The room-state camera. Shared by the selection effect and the navigate-mode
+ * teardown so ending navigation lands on exactly the view the user left.
+ */
+function roomCamera(room: RoomMatch, animationDuration: number) {
+  return {
+    centerCoordinate: room.center,
+    zoomLevel: ROOM_ZOOM,
+    pitch: 0,
+    heading: 0,
+    padding: FOCUS_PADDING,
+    animationMode: 'flyTo' as const,
+    animationDuration,
+  };
+}
+
+/**
+ * The building-state camera: framed to the building's own footprint rather than
+ * a flat zoom, so a complex like GDC and a small annex both fill the view.
+ *
+ * The zoom is computed analytically instead of via `fitBounds` so it can be
+ * clamped and applied in a single animation — fitting and then correcting
+ * visibly re-adjusts.
+ */
+function buildingCamera(building: Building, animationDuration: number) {
+  const win = Dimensions.get('window');
+  const framed = frameFootprint(building.footprint, {
+    width: win.width,
+    height: win.height,
+    // Matches FOCUS_PADDING, so the building is centred in the area *above*
+    // the floor-switcher panel rather than behind it.
+    paddingBottom: FOCUS_PADDING.paddingBottom,
+    inset: FRAME_INSET,
+    minZoom: BUILDING_MIN_ZOOM,
+    maxZoom: BUILDING_MAX_ZOOM,
+  });
+  return {
+    centerCoordinate: framed?.center ?? building.center,
+    zoomLevel: framed?.zoom ?? BUILDING_MIN_ZOOM,
+    padding: FOCUS_PADDING,
+    animationMode: 'flyTo' as const,
+    animationDuration,
+  };
+}
+
 interface Props {
   selectedRoom?: RoomMatch | null;
   selectedBuilding?: Building | null;
@@ -105,30 +164,71 @@ interface Props {
   onHeadingChange?: (heading: number) => void;
   onBuildingPress?: (buildingId: string) => void;
   onRoomPress?: (roomId: string) => void;
-  onRouteInfo?: (info: { distance: number; duration: number } | null) => void;
+  /** Route lifecycle — pending, resolved, or why it failed. */
+  onRouteState?: (state: RouteState) => void;
+  /** Live navigate-mode progress: bearing along the route and distance to go. */
+  onNavProgress?: (progress: NavProgress) => void;
   /** Fires when the nav camera stops/starts following the user (map pan disengages follow). */
   onFollowStateChange?: (disengaged: boolean) => void;
   navigateMode?: boolean;
+  /**
+   * Simulated origin for walking directions. Null in production — see src/debug.ts.
+   * When set, routes originate here instead of live GPS and the follow camera is
+   * driven manually, because the real device is somewhere else entirely.
+   */
+  debugOrigin?: LngLat | null;
 }
 
 export const CampusMap = forwardRef<CampusMapHandle, Props>(
-  function CampusMap({ selectedRoom, selectedBuilding, selectedFloor, cameraRef, onUserLocation, onHeadingChange, onBuildingPress, onRoomPress, onRouteInfo, onFollowStateChange, navigateMode }, ref) {
+  function CampusMap({ selectedRoom, selectedBuilding, selectedFloor, cameraRef, onUserLocation, onHeadingChange, onBuildingPress, onRoomPress, onRouteState, onNavProgress, onFollowStateChange, navigateMode, debugOrigin = null }, ref) {
     const mapRef = useRef<Mapbox.MapView>(null);
     const [geojsonUri, setGeojsonUri] = useState<string | null>(null);
     const [buildingsUri, setBuildingsUri] = useState<string | null>(null);
-    const [route, setRoute] = useState<GeoJSON.Feature<GeoJSON.LineString> | null>(null);
     const [walkedRoute, setWalkedRoute] = useState<GeoJSON.Feature<GeoJSON.LineString> | null>(null);
     const [remainingRoute, setRemainingRoute] = useState<GeoJSON.Feature<GeoJSON.LineString> | null>(null);
-    // On the iOS simulator, GPS always reports San Francisco. Seed a campus coordinate so routes work during dev.
-    // On a real device we always use actual GPS, so the seed is skipped.
-    const isSimulator = __DEV__ && !Constants.isDevice;
-    const [hasLocation, setHasLocation] = useState(isSimulator);
+    const [permission, setPermission] = useState<'unknown' | 'granted' | 'denied'>('unknown');
+    // Flips once, on the first GPS fix. Routes requested before then are retried
+    // when it flips — a room can be selected in the first second after launch,
+    // long before Core Location has anything to report.
+    const [hasFix, setHasFix] = useState(false);
+    // Device compass heading, tracked only in navigate mode (it drives the
+    // direction puck, and re-rendering the map on every heading tick is wasteful).
+    const [userHeading, setUserHeading] = useState(0);
     const hasHadSelection = useRef(false);
-    const userCoordsRef = useRef<[number, number] | null>(isSimulator ? [-97.7335, 30.2849] : null);
-    const onRouteInfoRef = useRef(onRouteInfo);
-    useEffect(() => { onRouteInfoRef.current = onRouteInfo; });
+    /** Live GPS only. The effective route origin is `debugOrigin ?? this`. */
+    const userCoordsRef = useRef<[number, number] | null>(null);
     const navigateModeRef = useRef(navigateMode);
     useEffect(() => { navigateModeRef.current = navigateMode; }, [navigateMode]);
+    const selectedRoomRef = useRef(selectedRoom);
+    useEffect(() => { selectedRoomRef.current = selectedRoom; }, [selectedRoom]);
+    const debugOriginRef = useRef(debugOrigin);
+    useEffect(() => { debugOriginRef.current = debugOrigin; }, [debugOrigin]);
+
+    const onRouteStateRef = useRef(onRouteState);
+    useEffect(() => { onRouteStateRef.current = onRouteState; });
+    const onNavProgressRef = useRef(onNavProgress);
+    useEffect(() => { onNavProgressRef.current = onNavProgress; });
+    const onUserLocationRef = useRef(onUserLocation);
+    useEffect(() => { onUserLocationRef.current = onUserLocation; });
+
+    /** Origin for routing and for the nav bar: simulated if set, else live GPS. */
+    const currentOrigin = (): [number, number] | null =>
+      debugOriginRef.current ?? userCoordsRef.current;
+
+    // Changes exactly when the origin should be re-read, so a route requested
+    // before the first GPS fix is retried the moment one lands.
+    const originKey = debugOrigin
+      ? `debug:${debugOrigin[0]},${debugOrigin[1]}`
+      : hasFix ? 'gps' : 'none';
+
+    const { route, state: routeState } = useWalkingRoute({
+      destination: selectedRoom?.center ?? null,
+      getOrigin: currentOrigin,
+      originKey,
+      permissionDenied: permission === 'denied',
+      accessToken: token,
+    });
+    useEffect(() => { onRouteStateRef.current?.(routeState); }, [routeState]);
     const routeRef = useRef(route);
     useEffect(() => { routeRef.current = route; }, [route]);
 
@@ -155,9 +255,10 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
       },
       centerOnUser: () => {
         setDisengaged(false);
-        if (userCoordsRef.current) {
+        const origin = currentOrigin();
+        if (origin) {
           cameraRef.current?.setCamera({
-            centerCoordinate: userCoordsRef.current,
+            centerCoordinate: origin,
             zoomLevel: navigateModeRef.current ? NAV_ZOOM : 17,
             ...(navigateModeRef.current ? { pitch: NAV_PITCH, padding: NAV_PADDING } : {}),
             animationDuration: 400,
@@ -177,23 +278,70 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
         .then((asset) => { if (asset.localUri) setBuildingsUri(asset.localUri); });
     }, []);
 
+    // Ask for location up front rather than letting Mapbox request it
+    // implicitly, so a denial is a state we know about and can explain.
+    useEffect(() => {
+      let cancelled = false;
+      Location.requestForegroundPermissionsAsync()
+        .then(({ status }) => {
+          if (!cancelled) setPermission(status === 'granted' ? 'granted' : 'denied');
+        })
+        .catch(() => { if (!cancelled) setPermission('denied'); });
+      return () => { cancelled = true; };
+    }, []);
+
+    /** Push the bearing to walk and the distance remaining up to the nav bar. */
+    const reportNavProgress = (coords: [number, number]) => {
+      const room = selectedRoomRef.current;
+      if (!room) {
+        onNavProgressRef.current?.({ bearing: null, distanceToDestination: null });
+        return;
+      }
+      const current = routeRef.current;
+      let bearing: number | null = null;
+      if (current) {
+        const routeCoords = current.geometry.coordinates as [number, number][];
+        const { remaining } = splitRouteAtUser(routeCoords, coords);
+        // The segment ahead, not the crow-flies bearing — the route goes around
+        // buildings, and an arrow pointing through one is worse than useless.
+        if (remaining.length >= 2) bearing = segmentBearing(remaining[0], remaining[1]);
+      }
+      if (bearing === null) bearing = segmentBearing(coords, room.center);
+      onNavProgressRef.current?.({
+        bearing,
+        distanceToDestination: haversine(coords, room.center),
+      });
+    };
+
+    useEffect(() => {
+      if (!navigateMode) {
+        onNavProgressRef.current?.({ bearing: null, distanceToDestination: null });
+        return;
+      }
+      const origin = currentOrigin();
+      if (origin) reportNavProgress(origin);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [navigateMode, route, selectedRoom, debugOrigin, hasFix]);
+
     const wasNavigating = useRef(false);
+    const restoreTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => () => { if (restoreTimer.current) clearTimeout(restoreTimer.current); }, []);
+
     useEffect(() => {
       if (navigateMode && route) {
         wasNavigating.current = true;
         setDisengaged(false);
-        // On a real device the Camera's followUserLocation props take over.
-        // The simulator has no usable GPS, so position the nav camera manually
-        // at the seeded origin, headed along the first route segment.
-        if (isSimulator) {
+        // With a simulated origin the declarative follow camera is off, because
+        // real GPS is somewhere else entirely. Place the nav camera by hand at
+        // the simulated origin, headed along the first route segment.
+        if (debugOrigin) {
           const coords = route.geometry.coordinates as [number, number][];
-          const origin = userCoordsRef.current ?? coords[0];
-          const next = coords.find((c) => c[0] !== origin[0] || c[1] !== origin[1]) ?? coords[coords.length - 1];
+          const next = coords.find((c) => c[0] !== debugOrigin[0] || c[1] !== debugOrigin[1]) ?? coords[coords.length - 1];
           cameraRef.current?.setCamera({
-            centerCoordinate: origin,
+            centerCoordinate: debugOrigin,
             zoomLevel: NAV_ZOOM,
             pitch: NAV_PITCH,
-            heading: segmentBearing(origin, next),
+            heading: segmentBearing(debugOrigin, next),
             padding: NAV_PADDING,
             animationMode: 'flyTo',
             animationDuration: 800,
@@ -207,57 +355,35 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
         if (wasNavigating.current) {
           wasNavigating.current = false;
           setDisengaged(false);
-          cameraRef.current?.setCamera({ pitch: 0, heading: 0, animationDuration: 500 });
+          const room = selectedRoomRef.current;
+          // One animation back to the room-state camera, not a pitch reset
+          // racing a re-frame — two overlapping animations are what left the
+          // camera skewed. The short delay lets `followUserLocation`, which
+          // released on this same render, actually let go of the native camera
+          // before the restore starts.
+          if (restoreTimer.current) clearTimeout(restoreTimer.current);
+          restoreTimer.current = setTimeout(() => {
+            restoreTimer.current = null;
+            if (room) {
+              cameraRef.current?.setCamera(roomCamera(room, 600));
+            } else {
+              // Navigation ended because the selection was cleared: level the
+              // camera and leave position alone.
+              cameraRef.current?.setCamera({ pitch: 0, heading: 0, animationDuration: 500 });
+            }
+          }, 80);
         }
       }
-    }, [navigateMode, route, cameraRef, isSimulator]);
-
-    useEffect(() => {
-      if (!selectedRoom || !token) {
-        setRoute(null);
-        onRouteInfoRef.current?.(null);
-        return;
-      }
-      const origin = userCoordsRef.current;
-      if (!origin) return;
-
-      const controller = new AbortController();
-      const [dLng, dLat] = selectedRoom.center;
-      const [oLng, oLat] = origin;
-      fetch(
-        `https://api.mapbox.com/directions/v5/mapbox/walking/${oLng},${oLat};${dLng},${dLat}?geometries=geojson&access_token=${token}`,
-        { signal: controller.signal },
-      )
-        .then((r) => r.json())
-        .then((data) => {
-          const leg = data.routes?.[0];
-          if (!leg) return;
-          setRoute({ type: 'Feature', properties: {}, geometry: leg.geometry });
-          onRouteInfoRef.current?.({ distance: leg.distance, duration: leg.duration });
-        })
-        .catch(() => {});
-      return () => controller.abort();
-    }, [selectedRoom, hasLocation]);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [navigateMode, route, cameraRef, debugOrigin]);
 
     useEffect(() => {
       if (selectedRoom) {
         hasHadSelection.current = true;
-        cameraRef.current?.setCamera({
-          centerCoordinate: selectedRoom.center,
-          zoomLevel: 19,
-          animationDuration: 400,
-          animationMode: 'flyTo',
-          padding: FOCUS_PADDING,
-        });
+        cameraRef.current?.setCamera(roomCamera(selectedRoom, 400));
       } else if (selectedBuilding) {
         hasHadSelection.current = true;
-        cameraRef.current?.setCamera({
-          centerCoordinate: selectedBuilding.center,
-          zoomLevel: 17,
-          animationDuration: 400,
-          animationMode: 'flyTo',
-          padding: FOCUS_PADDING,
-        });
+        cameraRef.current?.setCamera(buildingCamera(selectedBuilding, 400));
       } else if (hasHadSelection.current) {
         mapRef.current?.getZoom().then((zoom) => {
           if (zoom != null) cameraRef.current?.setCamera({
@@ -270,6 +396,27 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
     }, [selectedRoom, selectedBuilding, cameraRef]);
 
     const labels = useMemo(() => buildingLabels(), []);
+
+    // Never let navigate mode render without a line: `remainingRoute` is
+    // maintained by the location stream, which may not have ticked yet.
+    const navRoute = remainingRoute ?? route;
+
+    /**
+     * Directions snaps to sidewalks and can't route to a room on an upper
+     * floor, so the walking route stops at the nearest walkway. This is the
+     * "enter here, then go inside" hop from there to the room.
+     */
+    const finalHop = useMemo(() => {
+      if (!navigateMode || !selectedRoom || !route) return null;
+      const coords = route.geometry.coordinates as [number, number][];
+      const last = coords[coords.length - 1];
+      if (!last || haversine(last, selectedRoom.center) < 1) return null;
+      return {
+        type: 'Feature' as const,
+        properties: {},
+        geometry: { type: 'LineString' as const, coordinates: [last, selectedRoom.center] },
+      };
+    }, [navigateMode, selectedRoom, route]);
 
     if (!token) {
       return (
@@ -340,13 +487,16 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
             if (state.gestures.isGestureActive && navigateModeRef.current) setDisengaged(true);
           }}
         >
+          {/* Frames campus on first load only. Deliberately `defaultSettings`
+              rather than the declarative `bounds` prop: `bounds` re-asserts
+              whenever the Camera's other props change — notably when
+              `followUserLocation` flips off at the end of navigation — which
+              snapped the map back to the landing view. */}
           <Mapbox.Camera
             ref={cameraRef}
-            bounds={CAMPUS_BOUNDS}
+            defaultSettings={{ bounds: CAMPUS_BOUNDS }}
             animationDuration={0}
-            maxBounds={MAX_BOUNDS}
-            minZoomLevel={7}
-            followUserLocation={Boolean(navigateMode) && !isSimulator && !followDisengaged}
+            followUserLocation={Boolean(navigateMode) && !debugOrigin && !followDisengaged}
             onUserTrackingModeChange={(e) => {
               if (navigateModeRef.current && !e.nativeEvent.payload.followUserLocation) setDisengaged(true);
             }}
@@ -356,13 +506,14 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
             followPadding={NAV_PADDING}
           />
 
+          <Mapbox.Images images={{ 'nav-arrow': require('../../assets/Visuals/nav-arrow.png') }} />
+
           {buildingsUri && (
             <Mapbox.ShapeSource
               id="campus-buildings"
               url={buildingsUri}
               onPress={async (e) => {
                 const zoom = await mapRef.current?.getZoom();
-                console.log('[CampusMap] building tap zoom:', zoom?.toFixed(2));
                 if (zoom == null || zoom < BUILDING_TAP_MIN_ZOOM) return;
                 const buildingId = e.features[0]?.properties?.Building as string | undefined;
                 if (buildingId) onBuildingPress?.(buildingId);
@@ -508,7 +659,9 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
             </Mapbox.ShapeSource>
           )}
           {/* Navigate mode — 3D building extrusions from the style's own
-              (OSM-derived) building footprints, citywide. */}
+              (OSM-derived) building footprints, citywide. Declared before the
+              route layers so they can anchor above it with `aboveLayerID`:
+              at 60° pitch an extrusion will otherwise swallow the route line. */}
           {navigateMode && (
             <Mapbox.FillExtrusionLayer
               id="buildings-3d"
@@ -526,25 +679,42 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
             />
           )}
 
-          {navigateMode && remainingRoute && (
-            <Mapbox.ShapeSource id="route-remaining" shape={remainingRoute}>
+          {navigateMode && navRoute && (
+            <Mapbox.ShapeSource id="route-remaining" shape={navRoute}>
+              {/* White casing so the line reads against both the limestone
+                  extrusions and the light basemap. */}
+              <Mapbox.LineLayer
+                id="route-remaining-casing"
+                aboveLayerID="buildings-3d"
+                style={{
+                  lineColor: colors.white,
+                  lineWidth: ['interpolate', ['linear'], ['zoom'], 15, 8, 19, 15] as any,
+                  lineOpacity: 0.7,
+                  lineCap: 'round',
+                  lineJoin: 'round',
+                }}
+              />
               <Mapbox.LineLayer
                 id="route-remaining-line"
+                aboveLayerID="route-remaining-casing"
                 style={{
                   lineColor: colors.blueBonnet,
                   // Wider at nav zoom — the tilted camera views it at a grazing angle.
                   lineWidth: ['interpolate', ['linear'], ['zoom'], 15, 4, 19, 9] as any,
-                  lineOpacity: 0.85,
+                  lineOpacity: 0.95,
                   lineCap: 'round',
                   lineJoin: 'round',
                 }}
               />
             </Mapbox.ShapeSource>
           )}
+          {/* The portion already behind the puck. Only ever set alongside
+              `remainingRoute`, so its anchor layer is always mounted. */}
           {navigateMode && walkedRoute && (
             <Mapbox.ShapeSource id="route-walked" shape={walkedRoute}>
               <Mapbox.LineLayer
                 id="route-walked-line"
+                aboveLayerID="route-remaining-line"
                 style={{
                   lineColor: colors.blueBonnet,
                   lineWidth: ['interpolate', ['linear'], ['zoom'], 15, 3, 19, 7] as any,
@@ -552,6 +722,22 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
                   lineCap: 'butt',
                   lineJoin: 'round',
                   lineDasharray: [2, 2],
+                }}
+              />
+            </Mapbox.ShapeSource>
+          )}
+          {navigateMode && finalHop && (
+            <Mapbox.ShapeSource id="route-final-hop" shape={finalHop}>
+              <Mapbox.LineLayer
+                id="route-final-hop-line"
+                aboveLayerID="route-remaining-line"
+                style={{
+                  lineColor: colors.burntOrange,
+                  lineWidth: ['interpolate', ['linear'], ['zoom'], 15, 2.5, 19, 5] as any,
+                  lineOpacity: 0.95,
+                  lineCap: 'round',
+                  lineJoin: 'round',
+                  lineDasharray: [1.5, 1.5],
                 }}
               />
             </Mapbox.ShapeSource>
@@ -580,19 +766,47 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
             androidRenderMode="compass"
             onUpdate={(loc) => {
               const coords: [number, number] = [loc.coords.longitude, loc.coords.latitude];
-              if (!isSimulator) {
-                userCoordsRef.current = coords;
-                setHasLocation(true);
-              }
-              onUserLocation?.(coords);
-              if (navigateModeRef.current && routeRef.current && !isSimulator) {
-                const routeCoords = routeRef.current.geometry.coordinates as [number, number][];
-                const { walked, remaining } = splitRouteAtUser(routeCoords, coords);
-                setWalkedRoute({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: walked } });
-                setRemainingRoute({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: remaining } });
+              userCoordsRef.current = coords;
+              if (!hasFix) setHasFix(true);
+              // Report the *effective* origin, so the nav bar and arrival check
+              // agree with whatever the route was actually drawn from.
+              onUserLocationRef.current?.(debugOriginRef.current ?? coords);
+
+              if (navigateModeRef.current) {
+                const heading = Math.round(loc.coords.heading ?? loc.coords.course ?? 0);
+                setUserHeading((prev) => (prev === heading ? prev : heading));
+                // With a simulated origin the device is nowhere near the route,
+                // so splitting it at the real position would erase the line.
+                if (!debugOriginRef.current) {
+                  if (routeRef.current) {
+                    const routeCoords = routeRef.current.geometry.coordinates as [number, number][];
+                    const { walked, remaining } = splitRouteAtUser(routeCoords, coords);
+                    setWalkedRoute({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: walked } });
+                    setRemainingRoute({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: remaining } });
+                  }
+                  reportNavProgress(coords);
+                }
               }
             }}
-          />
+          >
+            {navigateMode ? (
+              // Google-Maps-style chevron, glued flat to the map so it stays on
+              // the route line at 60° pitch. Outside nav mode `undefined` falls
+              // back to Mapbox's default dot.
+              <Mapbox.SymbolLayer
+                id="nav-user-puck"
+                style={{
+                  iconImage: 'nav-arrow',
+                  iconSize: 0.85,
+                  iconRotate: userHeading,
+                  iconRotationAlignment: 'map',
+                  iconPitchAlignment: 'map',
+                  iconAllowOverlap: true,
+                  iconIgnorePlacement: true,
+                }}
+              />
+            ) : undefined}
+          </Mapbox.UserLocation>
         </Mapbox.MapView>
       </View>
     );

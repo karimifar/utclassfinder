@@ -28,6 +28,12 @@
         "distribution": "store",
         "image": "latest"
       }
+    },
+    "testflight": {
+      "extends": "production",
+      "env": {
+        "DEBUG_TOOLS": "true"
+      }
     }
   },
   "submit": {

@@ -4,6 +4,24 @@
 // UT Enterprise Authentication (Shibboleth IdP with the OIDC OP plugin).
 const UT_OIDC_BASE = 'https://enterprise.login.utexas.edu';
 
+// Debug tooling — the simulated navigation origin, so walking directions can be
+// exercised from off campus. Both values are baked in at build time.
+//
+//   DEBUG_ORIGIN="-97.7335,30.2849"  seeds that origin for the whole session.
+//   DEBUG_TOOLS=true                 enables the hidden long-press toggle on
+//                                    the header logo (dev builds always have it).
+//
+// Neither is set by default, so an App Store build cannot reach the toggle.
+// Set DEBUG_TOOLS=true for TestFlight builds and unset it before submitting.
+function parseDebugOrigin(raw) {
+  if (!raw) return null;
+  const parts = raw.split(',').map((n) => Number(n.trim()));
+  if (parts.length !== 2 || parts.some((n) => !Number.isFinite(n))) {
+    throw new Error(`DEBUG_ORIGIN must be "lng,lat" — got "${raw}"`);
+  }
+  return parts;
+}
+
 module.exports = ({ config }) => ({
   ...config,
   owner: 'karimifar',
@@ -43,13 +61,16 @@ module.exports = ({ config }) => ({
       'expo-location',
       {
         locationWhenInUsePermission:
-          'UT Class Finder uses your location to orient the campus map to where you are.',
+          'UT Class Finder uses your location to show where you are on the campus map and to give you walking directions to your classroom.',
       },
     ],
   ],
   extra: {
     // Public token (pk....) used by the map at runtime.
     mapboxAccessToken: process.env.MAPBOX_ACCESS_TOKEN,
+    // See parseDebugOrigin above. null in every build that doesn't opt in.
+    debugOrigin: parseDebugOrigin(process.env.DEBUG_ORIGIN),
+    debugTools: process.env.DEBUG_TOOLS === 'true',
     // UT EID / UT SSO OIDC config. The client is registered with UT IAM as a
     // public (native) client: no secret, PKCE required, redirect
     // utclassfinder://redirect. Endpoints default to UT's Shibboleth OIDC OP;

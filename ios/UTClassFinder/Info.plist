@@ -60,7 +60,7 @@
     <key>NSLocationAlwaysUsageDescription</key>
     <string>Allow $(PRODUCT_NAME) to access your location</string>
     <key>NSLocationWhenInUseUsageDescription</key>
-    <string>UT Class Finder uses your location to orient the campus map to where you are.</string>
+    <string>UT Class Finder uses your location to show where you are on the campus map and to give you walking directions to your classroom.</string>
     <key>NSUserActivityTypes</key>
     <array>
       <string>$(PRODUCT_BUNDLE_IDENTIFIER).expo.index_route</string>

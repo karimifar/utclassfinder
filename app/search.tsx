@@ -1,9 +1,11 @@
 import Mapbox from '@rnmapbox/maps';
 import React, { useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   FlatList,
   Image,
   Keyboard,
+  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -16,14 +18,20 @@ import Svg, { Path } from 'react-native-svg';
 import { useAuth } from '../src/auth/AuthContext';
 import { formatFloor, getBuildingById, sortedFloors } from '../src/data/buildings';
 import { getRoomById, getRoomsInBuilding, parseRoomCode, searchBuildings, searchRooms } from '../src/data/search';
-import type { Building, RoomMatch, SearchMatch } from '../src/data/types';
+import type { Building, LngLat, RoomMatch, SearchMatch } from '../src/data/types';
+import { CAMPUS_DEBUG_ORIGIN, CONFIGURED_DEBUG_ORIGIN, DEBUG_TOOLS_ENABLED } from '../src/debug';
 import { openDirectionsToCoordinate } from '../src/directions';
-import { CampusMap, CampusMapHandle } from '../src/map/CampusMap';
+import { CampusMap, CampusMapHandle, NavProgress } from '../src/map/CampusMap';
+import { ARRIVAL_METRES, type RouteState } from '../src/map/routeState';
 import { colors, radius, spacing } from '../src/theme';
 
 type AutocompleteItem =
   | { kind: 'building'; match: SearchMatch }
   | { kind: 'room'; room: RoomMatch };
+
+// A building is already scoped, so 8 results is tight for a query like "2".
+// The list scrolls past 5 rows anyway.
+const IN_BUILDING_RESULT_LIMIT = 20;
 
 export default function Search() {
   const insets = useSafeAreaInsets();
@@ -37,18 +45,26 @@ export default function Search() {
   const [selectedFloor, setSelectedFloor] = useState<string | null>(null);
   const [showResults, setShowResults] = useState(false);
   const [mapHeading, setMapHeading] = useState(0);
-  const [routeInfo, setRouteInfo] = useState<{ distance: number; duration: number } | null>(null);
+  const [routeState, setRouteState] = useState<RouteState>({ status: 'idle' });
+  const [navProgress, setNavProgress] = useState<NavProgress>({ bearing: null, distanceToDestination: null });
   const [navigateMode, setNavigateMode] = useState(false);
-  const [userCoords, setUserCoords] = useState<[number, number] | null>(null);
   const [followLost, setFollowLost] = useState(false);
+  // Simulated route origin, so navigation is testable from off campus. Seeded
+  // from the build config; the long-press toggle below can also set it at
+  // runtime, but only in builds that opted in. See src/debug.ts.
+  const [debugOrigin, setDebugOrigin] = useState<LngLat | null>(CONFIGURED_DEBUG_ORIGIN);
 
   const items: AutocompleteItem[] = useMemo(() => {
+    const q = query.trim();
     if (selectedBuilding) {
-      return getRoomsInBuilding(selectedBuilding.id, query.trim()).map(
+      // An empty query would return the building's first N rooms unranked —
+      // an unfiltered dump the moment you enter building state. The floor
+      // switcher is the entry point there; the list appears once you type.
+      if (!q) return [];
+      return getRoomsInBuilding(selectedBuilding.id, q, IN_BUILDING_RESULT_LIMIT).map(
         (room) => ({ kind: 'room' as const, room }),
       );
     }
-    const q = query.trim();
     if (!q) return [];
     const { roomToken } = parseRoomCode(q);
     if (roomToken) {
@@ -77,7 +93,7 @@ export default function Search() {
       const floors = sortedFloors(building.floors);
       setSelectedFloor(floors[0] ?? null);
       setQuery('');
-      setShowResults(true);
+      setShowResults(false);
     }
   };
 
@@ -109,11 +125,10 @@ export default function Search() {
     }
     if (selectedRoom) {
       setSelectedRoom(null);
-      setRouteInfo(null);
       setSelectedBuilding(selectedBuilding ?? selectedRoom.building);
       setSelectedFloor(selectedRoom.floor);
       setQuery('');
-      setShowResults(true);
+      setShowResults(false);
     } else {
       setSelectedBuilding(null);
       setSelectedFloor(null);
@@ -126,7 +141,6 @@ export default function Search() {
     if (selectedRoom) {
       // In room state, X = go all the way back to zero state
       setSelectedRoom(null);
-      setRouteInfo(null);
       setNavigateMode(false);
       setSelectedBuilding(null);
       setSelectedFloor(null);
@@ -140,6 +154,29 @@ export default function Search() {
 
   const activeBuilding = selectedBuilding ?? selectedRoom?.building ?? null;
   const inBuildingOrRoomState = activeBuilding !== null;
+
+  // After selecting a room the query holds that room's number, which would
+  // re-populate `items` and immediately re-open the list on the result the user
+  // just picked. Typing anything different re-opens it.
+  const queryEchoesSelectedRoom =
+    selectedRoom !== null &&
+    query.trim().toUpperCase() === selectedRoom.roomNumber.toUpperCase();
+  const showDropdown = showResults && items.length > 0 && !queryEchoesSelectedRoom;
+
+  const routeReady = routeState.status === 'ok' ? routeState : null;
+  const routeFailure = routeState.status === 'error' ? routeState.reason : null;
+  // 'no-location' isn't a failure the user can act on — a fix is still coming,
+  // and the route effect refires when it lands.
+  const routeSettling = routeState.status === 'pending' || routeFailure === 'no-location';
+  const unwalkable = routeFailure === 'too-far' || routeFailure === 'no-route';
+  const arrived =
+    navProgress.distanceToDestination !== null &&
+    navProgress.distanceToDestination <= ARRIVAL_METRES;
+
+  const toggleDebugOrigin = () => {
+    if (!DEBUG_TOOLS_ENABLED) return;
+    setDebugOrigin((current) => (current ? null : CAMPUS_DEBUG_ORIGIN));
+  };
   // Header stacks the logo row (44) and search bar (48) on one white surface,
   // with spacing.sm between them and below the search bar.
   const headerHeight = insets.top + 44 + spacing.sm + 48 + spacing.sm;
@@ -162,10 +199,11 @@ export default function Search() {
         onHeadingChange={setMapHeading}
         onBuildingPress={handleBuildingPress}
         onRoomPress={handleRoomPress}
-        onRouteInfo={setRouteInfo}
-        onUserLocation={setUserCoords}
+        onRouteState={setRouteState}
+        onNavProgress={setNavProgress}
         onFollowStateChange={setFollowLost}
         navigateMode={navigateMode}
+        debugOrigin={debugOrigin}
       />
 
       {/* App header — replaces the native stack header so the logo renders
@@ -173,12 +211,20 @@ export default function Search() {
           logo row (sign-out on the right) and the search bar. */}
       <View style={[styles.header, { height: headerHeight, paddingTop: insets.top }]}>
         <View style={styles.logoRow}>
-          <Image
-            source={require('../assets/Visuals/header.png')}
-            style={styles.headerLogo}
-            resizeMode="contain"
-            accessibilityLabel="Classroom Finder"
-          />
+          {/* Long-press is the hidden simulated-origin toggle. Unreachable
+              unless the build opted in — see DEBUG_TOOLS_ENABLED. */}
+          <Pressable
+            onLongPress={toggleDebugOrigin}
+            delayLongPress={900}
+            disabled={!DEBUG_TOOLS_ENABLED}
+          >
+            <Image
+              source={require('../assets/Visuals/header.png')}
+              style={styles.headerLogo}
+              resizeMode="contain"
+              accessibilityLabel="Classroom Finder"
+            />
+          </Pressable>
           <Pressable onPress={signOut} hitSlop={8} accessibilityLabel="Sign out">
             {({ pressed }) => (
               <Svg width={22} height={22} viewBox="0 0 24 24">
@@ -233,6 +279,14 @@ export default function Search() {
         </View>
       </View>
 
+      {/* Persistent warning that routes are not starting from real GPS, so a
+          tester can never mistake a simulated run for real behaviour. */}
+      {debugOrigin && (
+        <View style={[styles.debugBadge, { top: toolbarTop }]}>
+          <Text style={styles.debugBadgeText}>SIMULATED ORIGIN</Text>
+        </View>
+      )}
+
       {/* Map toolbar — zoom, location, compass */}
       <View style={[styles.toolbar, { top: toolbarTop }]}>
         <Pressable style={styles.toolBtn} onPress={() => mapHandle.current?.zoomIn()}>
@@ -258,8 +312,11 @@ export default function Search() {
         </Pressable>
       </View>
 
-      {/* Results dropdown — hidden in building state; floor switcher panel handles navigation there */}
-      {showResults && items.length > 0 && !inBuildingOrRoomState && (
+      {/* Results dropdown — also shown in building state, where it searches
+          rooms within that building. Absolutely positioned below the header;
+          the floor-switcher panel is anchored to the bottom, so they don't
+          collide. */}
+      {showDropdown && (
         <View style={[styles.dropdown, { top: dropdownTop }]}>
           <FlatList
             data={items}
@@ -268,7 +325,9 @@ export default function Search() {
             }
             keyboardShouldPersistTaps="handled"
             scrollEnabled={items.length > 5}
-            style={{ maxHeight: 300 }}
+            // Shorter in building state: the floor switcher is on screen too,
+            // and a full-height list leaves nothing of the map on an iPhone SE.
+            style={{ maxHeight: selectedBuilding ? 240 : 300 }}
             renderItem={({ item }) => {
               if (item.kind === 'room') {
                 const { room } = item;
@@ -364,19 +423,49 @@ export default function Search() {
             {titleCase(selectedRoom.building.name)}
           </Text>
           <Text style={styles.roomFloor}>{formatFloor(selectedRoom.floor)}</Text>
-          {routeInfo && (
+
+          {/* Route status. Every outcome says something — a failed Directions
+              call used to leave this blank indefinitely. */}
+          {routeReady && (
             <Text style={styles.routeInfo}>
-              ~{Math.max(1, Math.round(routeInfo.duration / 60))} min walk · {Math.round(routeInfo.distance)} m
+              ~{Math.max(1, Math.round(routeReady.duration / 60))} min walk · {Math.round(routeReady.distance)} m
             </Text>
           )}
+          {routeSettling && (
+            <View style={styles.routePending}>
+              <ActivityIndicator size="small" color={colors.blueBonnet} />
+              <Text style={styles.routePendingText}>
+                {routeFailure === 'no-location' ? 'Finding your location…' : 'Finding route…'}
+              </Text>
+            </View>
+          )}
+          {unwalkable && (
+            <Text style={styles.routeNotice}>Too far to walk from here</Text>
+          )}
+          {routeFailure === 'no-permission' && (
+            <Text style={styles.routeNotice}>Enable location to get walking directions</Text>
+          )}
+          {routeFailure === 'failed' && (
+            <Text style={styles.routeNotice}>Couldn't load walking directions</Text>
+          )}
+
+          {routeFailure === 'no-permission' ? (
+            <Pressable style={styles.walkBtn} onPress={() => Linking.openSettings()}>
+              <Text style={styles.walkBtnText}>Enable Location</Text>
+            </Pressable>
+          ) : !unwalkable && routeFailure !== 'failed' ? (
+            <Pressable
+              style={[styles.walkBtn, routeSettling && styles.walkBtnDisabled]}
+              disabled={routeSettling}
+              onPress={() => setNavigateMode(true)}
+            >
+              <Text style={styles.walkBtnText}>Walk here</Text>
+            </Pressable>
+          ) : null}
+
+          {/* Promoted to the primary action when there's no walking route. */}
           <Pressable
-            style={styles.walkBtn}
-            onPress={() => setNavigateMode(true)}
-          >
-            <Text style={styles.walkBtnText}>Walk here</Text>
-          </Pressable>
-          <Pressable
-            style={styles.mapsBtn}
+            style={unwalkable || routeFailure === 'failed' ? styles.walkBtn : styles.mapsBtn}
             onPress={() =>
               openDirectionsToCoordinate(
                 selectedRoom.center,
@@ -384,27 +473,48 @@ export default function Search() {
               )
             }
           >
-            <Text style={styles.mapsBtnText}>Open in Maps</Text>
+            <Text style={unwalkable || routeFailure === 'failed' ? styles.walkBtnText : styles.mapsBtnText}>
+              Open in Maps
+            </Text>
+          </Pressable>
+        </View>
+      )}
+
+      {/* Arrival — the route can't go indoors, so this is where walking ends. */}
+      {selectedRoom && navigateMode && arrived && (
+        <View style={[styles.bottomPanel, { bottom: panelBottom }]}>
+          <Text style={styles.arrivalTitle}>
+            You've arrived at {selectedRoom.building.abbr}
+          </Text>
+          <Text style={styles.arrivalDetail}>
+            Room {selectedRoom.roomNumber} is on {formatFloor(selectedRoom.floor)}
+          </Text>
+          <Pressable style={styles.walkBtn} onPress={() => setNavigateMode(false)}>
+            <Text style={styles.walkBtnText}>Done</Text>
           </Pressable>
         </View>
       )}
 
       {/* Navigate mode — compact bar with bearing arrow and ETA */}
-      {selectedRoom && navigateMode && (
+      {selectedRoom && navigateMode && !arrived && (
         <View style={[styles.navBar, { bottom: panelBottom }]}>
           <View style={styles.navArrowWrap}>
+            {/* Points along the next route segment, relative to what's on
+                screen — a crow-flies bearing points through buildings the
+                route goes around. */}
             <Text style={[
               styles.navArrow,
-              userCoords && { transform: [{ rotate: `${bearing(userCoords, selectedRoom.center)}deg` }] },
+              navProgress.bearing !== null &&
+                { transform: [{ rotate: `${navProgress.bearing - mapHeading}deg` }] },
             ]}>↑</Text>
           </View>
           <View style={styles.navInfo}>
             <Text style={styles.navDest} numberOfLines={1}>
               {selectedRoom.building.abbr} {selectedRoom.roomNumber}
             </Text>
-            {routeInfo && (
+            {routeReady && (
               <Text style={styles.navEta}>
-                ~{Math.max(1, Math.round(routeInfo.duration / 60))} min · {Math.round(routeInfo.distance)} m
+                ~{Math.max(1, Math.round(routeReady.duration / 60))} min · {Math.round(routeReady.distance)} m
               </Text>
             )}
           </View>
@@ -415,7 +525,7 @@ export default function Search() {
       )}
 
       {/* Re-center chip — panning during navigation disengages the follow camera */}
-      {selectedRoom && navigateMode && followLost && (
+      {selectedRoom && navigateMode && !arrived && followLost && (
         <Pressable
           style={({ pressed }) => [
             styles.recenterChip,
@@ -439,16 +549,6 @@ export default function Search() {
       </View>
     </View>
   );
-}
-
-function bearing(from: [number, number], to: [number, number]): number {
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const [lng1, lat1] = from.map(toRad);
-  const [lng2, lat2] = to.map(toRad);
-  const dLng = lng2 - lng1;
-  const y = Math.sin(dLng) * Math.cos(lat2);
-  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
-  return (Math.atan2(y, x) * 180) / Math.PI;
 }
 
 function titleCase(s: string | null): string {
@@ -605,6 +705,14 @@ const styles = StyleSheet.create({
   roomBuilding: { fontSize: 14, color: colors.slate, marginBottom: 2 },
   roomFloor: { fontSize: 13, color: colors.mist, marginBottom: spacing.xs },
   routeInfo: { fontSize: 13, color: colors.blueBonnet, fontWeight: '600', marginBottom: spacing.sm },
+  routePending: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  routePendingText: { fontSize: 13, color: colors.slate },
+  routeNotice: { fontSize: 13, color: colors.slate, fontWeight: '600', marginBottom: spacing.sm },
   walkBtn: {
     backgroundColor: colors.burntOrange,
     borderRadius: radius.sm,
@@ -612,7 +720,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: spacing.sm,
   },
+  walkBtnDisabled: { opacity: 0.45 },
   walkBtnText: { color: colors.white, fontWeight: '700', fontSize: 15 },
+
+  // Arrival card — replaces the nav bar in the last ~25m
+  arrivalTitle: { fontSize: 17, fontWeight: '700', color: colors.ink },
+  arrivalDetail: { fontSize: 14, color: colors.slate, marginTop: 2, marginBottom: spacing.md },
+
+  debugBadge: {
+    position: 'absolute',
+    left: spacing.md,
+    backgroundColor: colors.ink,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+  },
+  debugBadgeText: { color: colors.sunshine, fontSize: 11, fontWeight: '800', letterSpacing: 0.5 },
   mapsBtn: {
     borderWidth: 1.5,
     borderColor: colors.burntOrange,
