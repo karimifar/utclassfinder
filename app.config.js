@@ -50,13 +50,13 @@ module.exports = ({ config }) => ({
   plugins: [
     'expo-router',
     'expo-secure-store',
-    [
-      '@rnmapbox/maps',
-      {
-        // Secret download token (sk....) with DOWNLOADS:READ scope — build-time only.
-        RNMapboxMapsDownloadToken: process.env.MAPBOX_DOWNLOAD_TOKEN,
-      },
-    ],
+    // The download token is deliberately NOT passed as a plugin option. Doing
+    // so makes the plugin inline the secret into ios/Podfile, which is
+    // committed to git — it leaked exactly that way once. The native build
+    // reads RNMAPBOX_MAPS_DOWNLOAD_TOKEN from the environment instead: set it
+    // as an EAS environment variable for cloud builds, and export it locally
+    // before `pod install` or `npx expo run:ios`.
+    '@rnmapbox/maps',
     [
       'expo-location',
       {

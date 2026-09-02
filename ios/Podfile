@@ -13,8 +13,6 @@ install! 'cocoapods',
 
 prepare_react_native_project!
 
-# @generated begin @rnmapbox/maps-rnmapboxmapsimpl - expo prebuild (DO NOT MODIFY) sync-cd83d04bf48ed9a8114031f111b8717ec442424b
-# @generated end @rnmapbox/maps-rnmapboxmapsimpl
 target 'UTClassFinder' do
   use_expo_modules!
 
