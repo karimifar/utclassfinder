@@ -603,15 +603,46 @@ match its published discovery document at
 ### Identity
 
 The EID comes from decoding the `id_token` relayed by the broker
-(`decodeJwtPayload` / `eidFromClaims` in `AuthContext.tsx`). Claim names vary by
-IdP release policy, so we try `eid` → `utexasEduPersonEid` → `uid` →
-`preferred_username` → `sub` and fall back to the literal `"UT EID"`. The
-signature is **not** verified on-device — the token arrives over TLS from the
-broker, which received it over TLS from the token endpoint — and anything
-security-sensitive must be re-verified server-side.
+(`decodeJwtPayload` / `eidFromClaims` in `AuthContext.tsx`). The signature is
+**not** verified on-device — the token arrives over TLS from the broker, which
+received it over TLS from the token endpoint — and anything security-sensitive
+must be re-verified server-side.
 
-`realSignIn` logs the raw claims under `__DEV__` so the correct claim can be
-confirmed on the first real sign-in. Remove that block once it is known.
+Confirmed against a real sign-in (2026-09-03), `utexas_profile` releases:
+
+| Claim | Example | Note |
+|---|---|---|
+| `utexasEduPersonEid` | `abc12345` | The EID. What we read. |
+| `uid`, `username` | `abc12345` | Same value, duplicated |
+| `sub` | `abc12345@utexas.edu` | Scoped principal, **not** a bare EID |
+| `name`, `given_name`, `family_name` | | Display name |
+| `eid`, `preferred_username` | — | Do not exist |
+
+`eidFromClaims` reads `utexasEduPersonEid` → `uid` → `username`, then falls back
+to `sub` with the scope stripped, then to the literal `"UT EID"`.
+
+The token also carries `utexasEduPersonUin`, `utexasEduPersonAffCode`,
+`utexasEduPersonPrimaryTitle`, `eduPersonAffiliation` and similar directory
+attributes. None are used, and none are stored — see below.
+
+### What the session stores
+
+Only `{eid, name, expiresAt, mock}`. The access and ID tokens are used once, at
+sign-in, and then discarded: nothing in the app calls a UT API, so there is
+nothing to present them to.
+
+This is not only tidiness. Persisting the `id_token` tripped SecureStore's
+2048-byte advisory limit —
+
+```
+WARN  Value being stored in SecureStore is larger than 2048 bytes and it may
+not be stored successfully. In a future SDK version, this call may throw.
+```
+
+— so sessions could silently fail to persist today and would throw on a future
+Expo SDK, and it wrote a JWT full of directory PII into the keychain for no
+purpose. If a backend ever needs an identity assertion, re-run the flow rather
+than storing one.
 
 ### Notes
 
@@ -670,5 +701,5 @@ node scripts/build-buildings.mjs assets/data/buildings_rooms.geojson
 
 ## Open items
 
-- **UT SSO:** endpoints are confirmed against the now-public discovery document, the client and secret are confirmed to authenticate against the live token endpoint, and the broker is written and tested. Remaining before flipping `UT_OAUTH_ENABLED=true`: (1) deploy the broker and set `UT_OAUTH_BROKER_URL`; (2) complete one real sign-in in a dev client to confirm which claim `utexas_profile` releases the EID under, then remove the `__DEV__` claims log in `realSignIn`.
+- **UT SSO:** working end to end. Endpoints match the published discovery document, the broker is deployed at `https://utclassfinder-token-broker.emk.workers.dev`, and a real EID sign-in has completed on a dev client with the EID resolved from `utexasEduPersonEid`. Remaining: add a Cloudflare rate limiting rule in front of `/exchange`, rotate the client secret, and register a `post_logout_redirect_uri` with IAM if true single-logout is wanted.
 - **Room search scope:** `getRoomsInBuilding` uses a fixed limit of 8 for autocomplete; a larger limit or pagination could be useful if the room list grows in building state

@@ -38,14 +38,21 @@ const DEFAULT_SCOPES = ['openid', 'profile', 'utexas_profile'];
  */
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
 
+/**
+ * What we keep after sign-in — deliberately no token material.
+ *
+ * The tokens are used once, at sign-in, to establish identity and are then
+ * discarded: nothing in the app calls a UT API, so there is nothing to present
+ * them to. Persisting the id_token also overflowed SecureStore's 2048-byte
+ * advisory limit and would have written a JWT full of PII (UIN, affiliation
+ * codes, org unit, job title) into the keychain for no purpose. If a backend
+ * ever needs an assertion of identity, re-run the flow rather than storing one.
+ */
 export interface Session {
-  accessToken: string;
-  /** Best-effort identity label for the UI. */
+  /** Identity label for the UI. */
   eid: string;
   /** Display name from the profile scope, when the IdP releases one. */
   name?: string;
-  /** Raw OIDC ID token, kept for API calls that need to assert identity. */
-  idToken?: string;
   /** Epoch ms when the session expires; persists until then or logout. */
   expiresAt: number | null;
   mock: boolean;
@@ -84,20 +91,23 @@ function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
   }
 }
 
-/** Pull the UT EID out of the ID token, tolerating IdP claim-name variation. */
+/**
+ * Pull the UT EID out of the ID token.
+ *
+ * Confirmed against a real token from UT's IdP (2026-09-03): the EID is
+ * released as `utexasEduPersonEid` and duplicated in `uid` and `username`.
+ * There is no `eid` or `preferred_username` claim. `sub` holds the scoped
+ * principal (`abc12345@utexas.edu`), so it is a last resort and the scope is
+ * stripped rather than shown as an EID.
+ */
 function eidFromClaims(claims: Record<string, unknown> | null): string {
   if (!claims) return 'UT EID';
-  const candidates = [
-    'eid',
-    'utexasEduPersonEid',
-    'uid',
-    'preferred_username',
-    'sub',
-  ];
-  for (const key of candidates) {
+  for (const key of ['utexasEduPersonEid', 'uid', 'username']) {
     const v = claims[key];
     if (typeof v === 'string' && v.trim()) return v.trim();
   }
+  const sub = claims.sub;
+  if (typeof sub === 'string' && sub.trim()) return sub.trim().split('@')[0];
   return 'UT EID';
 }
 
@@ -208,18 +218,11 @@ async function realSignIn(): Promise<Session> {
   const token = await exchangeViaBroker(result.params.code, request.codeVerifier);
 
   const claims = token.id_token ? decodeJwtPayload(token.id_token) : null;
-  if (__DEV__) {
-    // TEMP: verifying what UT's IdP actually releases under utexas_profile.
-    // Remove once eidFromClaims' candidate list is confirmed against a real token.
-    console.log('[UT SSO] raw id_token claims:', JSON.stringify(claims, null, 2));
-  }
   const name = claims?.name;
 
   return {
-    accessToken: token.access_token ?? '',
     eid: eidFromClaims(claims),
     name: typeof name === 'string' ? name : undefined,
-    idToken: token.id_token,
     expiresAt: Date.now() + SESSION_TTL_MS,
     mock: false,
   };
@@ -228,7 +231,6 @@ async function realSignIn(): Promise<Session> {
 function mockSignIn(): Session {
   // Local-only session so the app is fully testable without SSO configured.
   return {
-    accessToken: 'mock-token',
     eid: 'mock-eid',
     expiresAt: Date.now() + SESSION_TTL_MS,
     mock: true,

@@ -124,8 +124,10 @@ Tokens are stored in the device keychain via `expo-secure-store` — no
 credentials are persisted in plain text. The redirect URI is
 `utclassfinder://redirect`, registered with UT IAM.
 
-> **Open item:** deploy the broker, then complete one real sign-in in a dev
-> client to confirm which claim carries the EID.
+The broker is deployed and a real EID sign-in has been verified on a dev client.
+
+> **Open item:** rate-limit `/exchange` in the Cloudflare dashboard before this
+> goes to a wide audience, and rotate the client secret.
 
 ## Data
 
@@ -148,7 +150,7 @@ directions), a convex-hull footprint (for the highlight), and its floor list.
 
 ## Roadmap
 
-- Real UT SSO (client provisioned and verified; pending broker deploy)
+- Real UT SSO — working end to end (broker deployed, EID sign-in verified)
 - Room-level data + floor plans
 - Course-schedule integration (auto-pull registered classrooms)
 - Indoor turn-by-turn, bathroom finder, accessibility directions
