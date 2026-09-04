@@ -12,6 +12,9 @@
     "build:nav-arrow": "node scripts/build-nav-arrow.mjs",
     "lint": "expo lint",
     "test": "jest",
+    "test:broker": "node --test server/__tests__/",
+    "broker:dev": "node server/token-broker.mjs",
+    "broker:deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

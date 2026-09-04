@@ -1,0 +1,16 @@
+# Cloudflare Worker config for the UT SSO token broker (server/worker.mjs).
+#
+# The client secret is NOT here. Set it once per environment with:
+#   npx wrangler secret put UT_OAUTH_CLIENT_SECRET
+#
+# Everything in [vars] is non-sensitive and matches the defaults compiled into
+# broker-core.mjs; they are listed so a deploy is self-documenting.
+
+name = "utclassfinder-token-broker"
+main = "server/worker.mjs"
+compatibility_date = "2025-09-01"
+
+[vars]
+UT_OAUTH_CLIENT_ID = "cola-class-finder-oidc"
+UT_OAUTH_TOKEN_ENDPOINT = "https://enterprise.login.utexas.edu/idp/profile/oidc/token"
+UT_OAUTH_REDIRECT_URI = "utclassfinder://redirect"

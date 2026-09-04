@@ -69,6 +69,11 @@ Set these in `.env` (gitignored):
 | `UT_OAUTH_CLIENT_ID` | OAuth client id from UT ITS. |
 | `UT_OAUTH_AUTHORIZATION_ENDPOINT` | OIDC authorization endpoint. |
 | `UT_OAUTH_TOKEN_ENDPOINT` | OIDC token endpoint. |
+| `UT_OAUTH_BROKER_URL` | Base URL of the deployed token broker. Required when SSO is enabled. |
+
+The UT client **secret** is not an app variable — it belongs only to the broker
+(`npx wrangler secret put UT_OAUTH_CLIENT_SECRET`). Anything in `.env` is baked
+into the shipped bundle.
 
 ## Project structure
 
@@ -80,6 +85,8 @@ app/                     expo-router screens
   building/[id].tsx      result: map + Get Directions
 src/
   auth/AuthContext.tsx   session state, real OAuth flow + mock fallback
+
+server/                  UT SSO token broker (Cloudflare Worker + local Node dev server)
   data/                  types, dataset loader, search/normalization
   map/BuildingMap.tsx    Mapbox footprint highlight
   directions.ts          Apple/Google Maps handoff
@@ -103,15 +110,22 @@ implements on both platforms. The flow lives in `src/auth/AuthContext.tsx`:
 
 - While `UT_OAUTH_ENABLED=false`, `signIn()` mints a local mock session so the
   rest of the app is fully testable.
-- When ITS provides the client id and endpoints, set the env vars and flip
-  `UT_OAUTH_ENABLED=true`; the same `signIn()` runs the real flow.
+- With `UT_OAUTH_ENABLED=true` and `UT_OAUTH_BROKER_URL` set, the same
+  `signIn()` runs the real flow.
+
+One wrinkle: UT's OP does not support public clients, so the token exchange has
+to be client-authenticated — and a native app cannot hold a secret. The small
+broker in `server/` does that one step. The app still runs authorization + PKCE
+in the browser itself; it just POSTs the resulting code to the broker instead of
+to UT. See the Authentication section of `TECHNICAL.md` for the full rationale
+and the deploy steps.
 
 Tokens are stored in the device keychain via `expo-secure-store` — no
 credentials are persisted in plain text. The redirect URI is
-`utclassfinder://redirect`; register it with ITS.
+`utclassfinder://redirect`, registered with UT IAM.
 
-> **Open item:** confirm the OAuth endpoints and register the redirect URI with
-> UT ITS (Entity ID, metadata XML, requested attributes).
+> **Open item:** deploy the broker, then complete one real sign-in in a dev
+> client to confirm which claim carries the EID.
 
 ## Data
 
@@ -134,7 +148,7 @@ directions), a convex-hull footprint (for the highlight), and its floor list.
 
 ## Roadmap
 
-- Real UT SSO once ITS provisions the app
+- Real UT SSO (client provisioned and verified; pending broker deploy)
 - Room-level data + floor plans
 - Course-schedule integration (auto-pull registered classrooms)
 - Indoor turn-by-turn, bathroom finder, accessibility directions

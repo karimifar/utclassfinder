@@ -33,7 +33,7 @@ app/
   index.tsx             Redirects to /search
 
 src/
-  auth/AuthContext.tsx  Session state, real OAuth + mock fallback
+  auth/AuthContext.tsx  Session state, real OAuth (via token broker) + mock fallback
   data/
     types.ts            Shared TypeScript types (Building, RoomMatch, SearchMatch)
     buildings.ts        buildings.json loader + getBuildingById / getBuildingByAbbr
@@ -43,6 +43,11 @@ src/
     CampusMap.tsx       Main map component (search screen)
     BuildingMap.tsx     Small footprint map (building detail screen)
   directions.ts         Apple/Google Maps handoff
+
+server/                 UT SSO token broker (holds the client secret; see Authentication)
+  broker-core.mjs       Exchange logic, host-agnostic
+  worker.mjs            Cloudflare Worker adapter (production)
+  token-broker.mjs      Node http adapter (local dev)
   theme.ts              Colors, spacing, border-radius
 
 assets/data/
@@ -481,33 +486,112 @@ colors = {
 
 ---
 
-## Authentication (`src/auth/AuthContext.tsx`)
+## Authentication (`src/auth/AuthContext.tsx` + `server/`)
 
-UT EID login via OIDC authorization code + PKCE in the system browser.
+UT EID login via OIDC authorization code + PKCE in the system browser, with the
+code exchange completed by a token broker we host.
 
-- `UT_OAUTH_ENABLED=false` → mock session, 8-hour expiry, app fully usable
-- `UT_OAUTH_ENABLED=true` → real UT SSO flow via `expo-auth-session`
+- `UT_OAUTH_ENABLED=false` → mock session, app fully usable
+- `UT_OAUTH_ENABLED=true` → real UT SSO flow via `expo-auth-session` + broker
 
 Session is stored in device keychain (`expo-secure-store`).
+
+### Why there is a broker
+
+UT's OP **does not support public clients**. Its discovery document advertises:
+
+```
+token_endpoint_auth_methods_supported:
+  client_secret_basic, client_secret_post, client_secret_jwt, private_key_jwt
+```
+
+`none` is absent, and an unauthenticated exchange is refused:
+
+```
+POST /idp/profile/oidc/token   (no client auth)
+→ 401 {"error":"invalid_client","error_description":"Client authentication failed"}
+```
+
+So the exchange must carry a client secret — which a native app cannot hold,
+since anything in `app.config.js`/`.env` is serialised into the shipped bundle.
+`server/` resolves this: the app runs authorization + PKCE in the browser as
+normal, then POSTs `{code, code_verifier}` to the broker, which attaches
+`client_secret_basic` and forwards to UT. PKCE still binds each exchange to the
+app instance that started it; the broker adds client authentication and nothing
+else. It is stateless and logs outcomes only — never codes, tokens, or the secret.
+
+```
+app ──authorize+PKCE──▶ UT IdP (system browser)
+app ◀────── code ────── UT IdP
+app ──{code, verifier}─▶ broker ──+client_secret──▶ UT /token
+app ◀────── tokens ──── broker ◀───── tokens ──────
+```
+
+| File | Role |
+|---|---|
+| `server/broker-core.mjs` | All logic; no HTTP wiring, so both hosts share it |
+| `server/worker.mjs` | Cloudflare Worker adapter (production) |
+| `server/token-broker.mjs` | Node `http` adapter (local dev only) |
+| `wrangler.toml` | Worker config; non-sensitive `[vars]` only |
+
+`client_secret_post` returns `InvalidEvent` on this IdP — **basic auth is the
+only method that works**. Both halves of the credential are percent-encoded
+before base64: RFC 6749 §2.3.1 requires it and Nimbus (which Shibboleth's OP
+parses with) percent-decodes them. Today's secret is alphanumeric so the
+encoding is a no-op; it matters at rotation.
+
+There is deliberately **no refresh path**. The app never calls a UT API with the
+access token — signing in only proves EID identity — so nothing needs
+refreshing, and `offline_access` would mean storing a long-lived refresh token
+on-device for no gain. Session length is a local constant, `SESSION_TTL_MS` in
+`AuthContext.tsx` (currently 30 days), rather than the IdP's ~1h access token
+lifetime; inheriting that would force a browser re-login every hour.
+
+### Deploying the broker
+
+```bash
+npx wrangler secret put UT_OAUTH_CLIENT_SECRET   # paste the UT IAM secret
+npx wrangler deploy
+curl https://<worker-url>/healthz                # → {"ok":true}
+```
+
+Then set `UT_OAUTH_BROKER_URL=https://<worker-url>` in `.env` and rebuild the app.
+
+The secret lives **only** in Cloudflare's secret store. It must never be in
+`.env`, `wrangler.toml`, or git. `wrangler deploy` uploads only the `[vars]`
+declared in `wrangler.toml` (verify with `wrangler deploy --dry-run`); wrangler
+reads the repo's `.env` for *local* `dev` runs only. For local dev put the
+secret in `.dev.vars` (gitignored) and run `npm run broker:dev`.
+
+Because `/exchange` is a public endpoint proxying to UT, put a Cloudflare rate
+limiting rule in front of it. Abuse potential is low — codes are single-use,
+short-lived, and PKCE-bound — but the broker is stateless by design and cannot
+rate limit itself.
 
 ### Registered client (UT IAM)
 
 | Field | Value |
 |---|---|
 | `client_id` | `cola-class-finder-oidc` |
-| `client_secret` | *(none — public native client)* |
-| `token_endpoint_auth_method` | `none` |
+| `client_secret` | *(confidential — held only by the broker)* |
+| `token_endpoint_auth_method` | `client_secret_basic` |
 | `grant_types` | `authorization_code` |
 | `response_types` | `code` |
 | `scope` | `openid profile utexas_profile` |
 | `redirect_uris` | `utclassfinder://redirect` |
 | `post_logout_redirect_uris` | *(none)* |
 
-Because there is no client secret, **PKCE is the only thing binding the token exchange to this app** — `usePKCE: true` in `AuthRequest` is not optional.
+`usePKCE: true` in `AuthRequest` is not optional — it is what ties the exchange
+to this app instance, and `realSignIn` fails hard if the verifier is missing.
+The broker pins `redirect_uri` server-side so a stolen code cannot be redeemed
+against a different callback through us.
 
 ### Endpoints
 
-UT Enterprise Authentication runs Shibboleth IdP with the OIDC OP plugin. Defaults live in `app.config.js` and can be overridden per-environment in `.env`:
+UT Enterprise Authentication runs Shibboleth IdP with the OIDC OP plugin. These
+match its published discovery document at
+`https://enterprise.login.utexas.edu/.well-known/openid-configuration`
+(verified 2026-09-03). Defaults live in `app.config.js`, overridable via `.env`:
 
 | Endpoint | URL |
 |---|---|
@@ -518,12 +602,22 @@ UT Enterprise Authentication runs Shibboleth IdP with the OIDC OP plugin. Defaul
 
 ### Identity
 
-The EID comes from decoding the `id_token` returned by the token endpoint (`decodeJwtPayload` / `eidFromClaims` in `AuthContext.tsx`). Claim names vary by IdP release policy, so we try `eid` → `utexasEduPersonEid` → `uid` → `preferred_username` → `sub` and fall back to the literal `"UT EID"`. The signature is **not** verified on-device — the token arrives over TLS straight from the token endpoint, and anything security-sensitive must be re-verified server-side.
+The EID comes from decoding the `id_token` relayed by the broker
+(`decodeJwtPayload` / `eidFromClaims` in `AuthContext.tsx`). Claim names vary by
+IdP release policy, so we try `eid` → `utexasEduPersonEid` → `uid` →
+`preferred_username` → `sub` and fall back to the literal `"UT EID"`. The
+signature is **not** verified on-device — the token arrives over TLS from the
+broker, which received it over TLS from the token endpoint — and anything
+security-sensitive must be re-verified server-side.
+
+`realSignIn` logs the raw claims under `__DEV__` so the correct claim can be
+confirmed on the first real sign-in. Remove that block once it is known.
 
 ### Notes
 
 - No `post_logout_redirect_uris` are registered, so `signOut()` clears the local keychain session only. The IdP browser session persists; the next sign-in may complete without a password prompt. Ask IAM to register a logout redirect if true single-logout is needed.
 - Expo Go cannot receive `utclassfinder://redirect` — testing SSO requires a dev client build.
+- The discovery document does not advertise `code_challenge_methods_supported`. An authorization request with `S256` is accepted, but that alone does not prove the token endpoint *enforces* the verifier; worth confirming with IAM.
 
 ---
 
@@ -540,8 +634,11 @@ The EID comes from decoding the `id_token` returned by the token endpoint (`deco
 | `UT_OAUTH_TOKEN_ENDPOINT` | Override for the token endpoint |
 | `UT_OAUTH_USERINFO_ENDPOINT` | Override for the userinfo endpoint |
 | `UT_OAUTH_SCOPES` | Space-separated scopes (default `openid profile utexas_profile`) |
+| `UT_OAUTH_BROKER_URL` | Base URL of the deployed token broker; required when enabled |
 
-All `UT_OAUTH_*` values except `ENABLED` have working defaults in `app.config.js`; set them only to override.
+All `UT_OAUTH_*` values except `ENABLED` and `BROKER_URL` have working defaults in `app.config.js`; set them only to override.
+
+`UT_OAUTH_CLIENT_SECRET` is deliberately **not** in this table. It is never read by the app — only by the broker, from its own host environment. Putting it in `.env` would bake it into the shipped bundle.
 
 ---
 
@@ -573,5 +670,5 @@ node scripts/build-buildings.mjs assets/data/buildings_rooms.geojson
 
 ## Open items
 
-- **UT SSO:** client is provisioned and wired up, but untested against the live IdP. Two things to confirm with IAM before flipping `UT_OAUTH_ENABLED=true`: (1) the exact endpoint paths — the discovery document at `/.well-known/openid-configuration` was not publicly readable, so the Shibboleth defaults are inferred; (2) which claim `utexas_profile` releases the EID under.
+- **UT SSO:** endpoints are confirmed against the now-public discovery document, the client and secret are confirmed to authenticate against the live token endpoint, and the broker is written and tested. Remaining before flipping `UT_OAUTH_ENABLED=true`: (1) deploy the broker and set `UT_OAUTH_BROKER_URL`; (2) complete one real sign-in in a dev client to confirm which claim `utexas_profile` releases the EID under, then remove the `__DEV__` claims log in `realSignIn`.
 - **Room search scope:** `getRoomsInBuilding` uses a fixed limit of 8 for autocomplete; a larger limit or pagination could be useful if the room list grows in building state

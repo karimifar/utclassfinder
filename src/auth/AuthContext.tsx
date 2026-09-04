@@ -19,12 +19,24 @@ interface UtOauthConfig {
   authorizationEndpoint?: string;
   tokenEndpoint?: string;
   userInfoEndpoint?: string;
+  brokerUrl?: string;
   scopes?: string[];
 }
 
 const oauth = (Constants.expoConfig?.extra?.utOauth ?? {}) as UtOauthConfig;
 
 const DEFAULT_SCOPES = ['openid', 'profile', 'utexas_profile'];
+
+/**
+ * How long a sign-in lasts on this device.
+ *
+ * Deliberately not the OIDC access token's expires_in. We never call a UT API
+ * with that token — signing in only proves the user holds a valid EID — so
+ * there is nothing whose freshness matters, and inheriting the IdP's ~1 hour
+ * lifetime would force a full browser re-login every hour for no security
+ * benefit. This is the one knob controlling how often users re-authenticate.
+ */
+const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
 
 export interface Session {
   accessToken: string;
@@ -34,15 +46,25 @@ export interface Session {
   name?: string;
   /** Raw OIDC ID token, kept for API calls that need to assert identity. */
   idToken?: string;
-  /** Epoch ms when the token expires; sessions persist until then or logout. */
+  /** Epoch ms when the session expires; persists until then or logout. */
   expiresAt: number | null;
   mock: boolean;
 }
 
+/** Shape of the token endpoint's response, as relayed by the broker. */
+interface BrokerTokenResponse {
+  access_token?: string;
+  id_token?: string;
+  expires_in?: number;
+  error?: string;
+  error_description?: string;
+}
+
 /**
  * Decode a JWT payload. Claims are used only for display — the token was
- * received over TLS directly from the token endpoint, so we do not verify the
- * signature on-device. Anything security-sensitive must be verified server-side.
+ * received over TLS from our broker, which received it over TLS directly from
+ * the token endpoint, so we do not verify the signature on-device. Anything
+ * security-sensitive must be verified server-side.
  */
 function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
   try {
@@ -110,10 +132,46 @@ async function saveSession(s: Session): Promise<void> {
 const redirectUri = AuthSession.makeRedirectUri({ scheme: 'utclassfinder', path: 'redirect' });
 
 /**
- * Real UT SSO OIDC flow with PKCE via the system browser. The client is
- * registered with UT IAM as a public native client (`token_endpoint_auth_method:
- * none`), so no secret is sent — PKCE is what proves the exchange came from us.
- * Used only when extra.utOauth.enabled is true; otherwise signIn() mocks.
+ * Trade the authorization code for tokens via our broker.
+ *
+ * UT's OP does not support public clients — its token endpoint requires client
+ * authentication, and "none" is not among the methods it advertises — so the
+ * exchange cannot happen on-device without shipping the client secret to every
+ * install. The broker (server/) holds the secret and adds only that client
+ * authentication; PKCE still binds this exchange to this app instance.
+ */
+async function exchangeViaBroker(
+  code: string,
+  codeVerifier: string,
+): Promise<BrokerTokenResponse> {
+  const base = oauth.brokerUrl?.replace(/\/+$/, '');
+  if (!base) {
+    throw new Error('Sign-in is not configured for this build.');
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`${base}/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ code, code_verifier: codeVerifier }),
+    });
+  } catch {
+    throw new Error('Could not reach the sign-in service. Check your connection and try again.');
+  }
+
+  const payload = (await res.json().catch(() => null)) as BrokerTokenResponse | null;
+  if (!res.ok || !payload?.id_token) {
+    const detail = payload?.error_description || payload?.error;
+    throw new Error(detail ? `Sign-in failed: ${detail}` : 'Sign-in failed.');
+  }
+  return payload;
+}
+
+/**
+ * Real UT SSO OIDC flow: authorization code + PKCE in the system browser, then
+ * the code exchange through our broker. Used only when extra.utOauth.enabled
+ * is true; otherwise signIn() mocks.
  */
 async function realSignIn(): Promise<Session> {
   const discovery: AuthSession.DiscoveryDocument = {
@@ -141,19 +199,15 @@ async function realSignIn(): Promise<Session> {
     throw new Error('Sign-in was cancelled or failed.');
   }
 
-  const token = await AuthSession.exchangeCodeAsync(
-    {
-      clientId: oauth.clientId!,
-      code: result.params.code,
-      redirectUri,
-      extraParams: request.codeVerifier
-        ? { code_verifier: request.codeVerifier }
-        : undefined,
-    },
-    discovery,
-  );
+  // PKCE is the only thing binding the exchange to this app instance, so a
+  // missing verifier is a hard failure rather than a degraded exchange.
+  if (!request.codeVerifier) {
+    throw new Error('Sign-in failed: PKCE verifier missing.');
+  }
 
-  const claims = token.idToken ? decodeJwtPayload(token.idToken) : null;
+  const token = await exchangeViaBroker(result.params.code, request.codeVerifier);
+
+  const claims = token.id_token ? decodeJwtPayload(token.id_token) : null;
   if (__DEV__) {
     // TEMP: verifying what UT's IdP actually releases under utexas_profile.
     // Remove once eidFromClaims' candidate list is confirmed against a real token.
@@ -162,21 +216,21 @@ async function realSignIn(): Promise<Session> {
   const name = claims?.name;
 
   return {
-    accessToken: token.accessToken,
+    accessToken: token.access_token ?? '',
     eid: eidFromClaims(claims),
     name: typeof name === 'string' ? name : undefined,
-    idToken: token.idToken,
-    expiresAt: token.expiresIn ? Date.now() + token.expiresIn * 1000 : null,
+    idToken: token.id_token,
+    expiresAt: Date.now() + SESSION_TTL_MS,
     mock: false,
   };
 }
 
 function mockSignIn(): Session {
-  // Local-only session so the app is fully testable before SSO is wired up.
+  // Local-only session so the app is fully testable without SSO configured.
   return {
     accessToken: 'mock-token',
     eid: 'mock-eid',
-    expiresAt: Date.now() + 1000 * 60 * 60 * 8,
+    expiresAt: Date.now() + SESSION_TTL_MS,
     mock: true,
   };
 }

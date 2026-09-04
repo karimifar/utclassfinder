@@ -30,3 +30,7 @@ android/
 npm-debug.*
 yarn-error.*
 assets/data/All_Buildings_data.csv
+
+# Cloudflare Worker — local secrets and build cache (token broker)
+.dev.vars
+.wrangler/

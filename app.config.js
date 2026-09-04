@@ -71,10 +71,15 @@ module.exports = ({ config }) => ({
     // See parseDebugOrigin above. null in every build that doesn't opt in.
     debugOrigin: parseDebugOrigin(process.env.DEBUG_ORIGIN),
     debugTools: process.env.DEBUG_TOOLS === 'true',
-    // UT EID / UT SSO OIDC config. The client is registered with UT IAM as a
-    // public (native) client: no secret, PKCE required, redirect
-    // utclassfinder://redirect. Endpoints default to UT's Shibboleth OIDC OP;
-    // override via .env if IAM moves them.
+    // UT EID / UT SSO OIDC config. Endpoints are UT's Shibboleth OIDC OP and
+    // match its published discovery document; override via .env only if IAM
+    // moves them.
+    //
+    // The client is CONFIDENTIAL: UT's OP does not offer token_endpoint_auth_method
+    // "none", so the code exchange must be client-authenticated. The secret is
+    // never in this config and never in the bundle — it lives only in the token
+    // broker (server/), which the app calls at brokerUrl instead of hitting UT's
+    // token endpoint directly.
     utOauth: {
       enabled: process.env.UT_OAUTH_ENABLED === 'true',
       clientId: process.env.UT_OAUTH_CLIENT_ID || 'cola-class-finder-oidc',
@@ -85,6 +90,10 @@ module.exports = ({ config }) => ({
         process.env.UT_OAUTH_TOKEN_ENDPOINT || `${UT_OIDC_BASE}/idp/profile/oidc/token`,
       userInfoEndpoint:
         process.env.UT_OAUTH_USERINFO_ENDPOINT || `${UT_OIDC_BASE}/idp/profile/oidc/userinfo`,
+      // Base URL of our token broker; the app POSTs {code, code_verifier} to
+      // `${brokerUrl}/exchange`. No trailing slash needed. Required whenever
+      // enabled is true — sign-in cannot complete without it.
+      brokerUrl: process.env.UT_OAUTH_BROKER_URL,
       // Registered scopes. utexas_profile carries the UT EID claim.
       scopes: (process.env.UT_OAUTH_SCOPES || 'openid profile utexas_profile').split(/[\s,]+/).filter(Boolean),
     },
