@@ -120,6 +120,10 @@ function eidFromClaims(claims: Record<string, unknown> | null): string {
  */
 export function initialsFromSession(session: Session | null): string {
   if (!session) return '';
+  // A mock session has no real identity behind it. Labelling it plainly is
+  // what stops a tester filing a bug against behaviour they only saw because
+  // they skipped sign-in.
+  if (session.mock) return 'TEST';
   const name = session.name?.trim();
   if (name) {
     const parts = name.split(/\s+/).filter(Boolean);
@@ -135,7 +139,12 @@ export function initialsFromSession(session: Session | null): string {
 interface AuthState {
   session: Session | null;
   loading: boolean;
-  signIn: () => Promise<void>;
+  /**
+   * `forceMock` mints a local session even when SSO is configured, so a build
+   * can offer both paths at once. Only reachable where DEBUG_TOOLS_ENABLED is
+   * true — see the login screen.
+   */
+  signIn: (opts?: { forceMock?: boolean }) => Promise<void>;
   signOut: () => Promise<void>;
 }
 
@@ -268,8 +277,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .finally(() => setLoading(false));
   }, []);
 
-  const signIn = useCallback(async () => {
-    const s = oauth.enabled ? await realSignIn() : mockSignIn();
+  const signIn = useCallback(async (opts?: { forceMock?: boolean }) => {
+    const useMock = opts?.forceMock === true || !oauth.enabled;
+    const s = useMock ? mockSignIn() : await realSignIn();
     await saveSession(s);
     setSession(s);
   }, []);
