@@ -42,6 +42,9 @@
       "ios": {
         "ascAppId": "6799179562"
       }
+    },
+    "testflight": {
+      "extends": "production"
     }
   }
 }
