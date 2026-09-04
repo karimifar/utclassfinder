@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Path } from 'react-native-svg';
-import { useAuth } from '../src/auth/AuthContext';
+import { initialsFromSession, useAuth } from '../src/auth/AuthContext';
 import { formatFloor, getBuildingById, sortedFloors } from '../src/data/buildings';
 import { getRoomById, getRoomsInBuilding, parseRoomCode, searchBuildings, searchRooms } from '../src/data/search';
 import type { Building, LngLat, RoomMatch, SearchMatch } from '../src/data/types';
@@ -35,7 +35,8 @@ const IN_BUILDING_RESULT_LIMIT = 20;
 
 export default function Search() {
   const insets = useSafeAreaInsets();
-  const { signOut } = useAuth();
+  const { session, signOut } = useAuth();
+  const initials = initialsFromSession(session);
   const cameraRef = useRef<Mapbox.Camera>(null);
   const mapHandle = useRef<CampusMapHandle>(null);
 
@@ -208,7 +209,7 @@ export default function Search() {
 
       {/* App header — replaces the native stack header so the logo renders
           flat: no glass capsule, shadow, tint, or press effect. Contains the
-          logo row (sign-out on the right) and the search bar. */}
+          logo row (initials + sign-out on the right) and the search bar. */}
       <View style={[styles.header, { height: headerHeight, paddingTop: insets.top }]}>
         <View style={styles.logoRow}>
           {/* Long-press is the hidden simulated-origin toggle. Unreachable
@@ -225,20 +226,30 @@ export default function Search() {
               accessibilityLabel="Classroom Finder"
             />
           </Pressable>
-          <Pressable onPress={signOut} hitSlop={8} accessibilityLabel="Sign out">
-            {({ pressed }) => (
-              <Svg width={22} height={22} viewBox="0 0 24 24">
-                <Path
-                  d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"
-                  stroke={pressed ? colors.ink : colors.slate}
-                  strokeWidth={2}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  fill="none"
-                />
-              </Svg>
-            )}
-          </Pressable>
+          <View style={styles.headerActions}>
+            {initials ? (
+              <Text
+                style={styles.initials}
+                accessibilityLabel={`Signed in as ${session?.name ?? session?.eid}`}
+              >
+                {initials}
+              </Text>
+            ) : null}
+            <Pressable onPress={signOut} hitSlop={8} accessibilityLabel="Sign out">
+              {({ pressed }) => (
+                <Svg width={22} height={22} viewBox="0 0 24 24">
+                  <Path
+                    d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"
+                    stroke={pressed ? colors.ink : colors.slate}
+                    strokeWidth={2}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    fill="none"
+                  />
+                </Svg>
+              )}
+            </Pressable>
+          </View>
         </View>
 
         <View style={styles.searchBar}>
@@ -575,6 +586,15 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   headerLogo: { width: 158, height: 25 },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  // Flat like the rest of the header — no avatar chip, so it reads as a label
+  // paired with the sign-out icon rather than a second control.
+  initials: {
+    fontSize: 13,
+    fontWeight: '600',
+    letterSpacing: 0.5,
+    color: colors.slate,
+  },
 
   searchBar: {
     height: 48,

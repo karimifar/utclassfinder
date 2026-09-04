@@ -111,6 +111,27 @@ function eidFromClaims(claims: Record<string, unknown> | null): string {
   return 'UT EID';
 }
 
+/**
+ * Two-letter label for the header, e.g. "MK".
+ *
+ * Prefers the display name from the profile scope. When the IdP releases no
+ * name, UT EIDs lead with letters (`mk46795`), so the leading letters are the
+ * closest thing to initials available.
+ */
+export function initialsFromSession(session: Session | null): string {
+  if (!session) return '';
+  const name = session.name?.trim();
+  if (name) {
+    const parts = name.split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) {
+      return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+    }
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  }
+  const letters = session.eid.replace(/[^a-zA-Z]/g, '');
+  return (letters || session.eid).slice(0, 2).toUpperCase();
+}
+
 interface AuthState {
   session: Session | null;
   loading: boolean;
