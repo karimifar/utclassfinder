@@ -94,17 +94,22 @@ describe('frameFootprint', () => {
 });
 
 describe('frameFootprint for a walking overview', () => {
-  // Matches overviewCamera in CampusMap: the same viewport and panel padding,
-  // but clamped for a whole walk rather than a single building.
+  // Matches overviewCamera in CampusMap: the same viewport, the panel below and
+  // the header above, clamped for a whole walk rather than a single building.
+  // The header is insets.top (59 on a Dynamic Island phone) + 108 of chrome.
+  const HEADER = 167;
+  // OVERVIEW_INSET — the pull-back dial.
+  const INSET = 48;
   const OVERVIEW = {
     ...VIEWPORT,
+    paddingTop: HEADER,
     paddingBottom: VIEWPORT.height * 0.3,
-    inset: 28,
-    minZoom: 12.0,
+    inset: INSET,
+    minZoom: 11.5,
     maxZoom: 18.0,
   };
-  const AVAIL_W = VIEWPORT.width - 28 * 2;
-  const AVAIL_H = VIEWPORT.height - VIEWPORT.height * 0.3 - 28 * 2;
+  const AVAIL_W = VIEWPORT.width - INSET * 2;
+  const AVAIL_H = VIEWPORT.height - HEADER - VIEWPORT.height * 0.3 - INSET * 2;
 
   /**
    * Everything is in frame exactly when the clamp didn't zoom in past the fit.
@@ -127,12 +132,14 @@ describe('frameFootprint for a walking overview', () => {
   });
 
   // T-2: a floor of 14 framed anything past roughly 1.5km by cropping it. The
-  // floor has to clear the longest walk "Walk here" is willing to offer.
-  it('still frames the longest walk the app will offer', () => {
-    const from: LngLat = [-97.7400, 30.2820];
-    // ~5km east of `from` at this latitude — MAX_WALK_METRES.
-    const to: LngLat = [-97.7400 + 5000 / (111320 * Math.cos((30.282 * Math.PI) / 180)), 30.2820];
-    expect(framesAllOf([from, to])).toBe(true);
+  // floor has to clear the longest walk "Walk here" is willing to offer, on
+  // either axis — north-south is the tight one, because the header and the
+  // panel between them take well over half the height.
+  it.each([
+    ['east-west', [-97.7400 + 5000 / (111320 * Math.cos((30.282 * Math.PI) / 180)), 30.2820]],
+    ['north-south', [-97.7400, 30.2820 + 5000 / 110574]],
+  ] as [string, LngLat][])('still frames the longest walk the app will offer (%s)', (_, to) => {
+    expect(framesAllOf([[-97.7400, 30.2820], to])).toBe(true);
   });
 
   it('stops at the ceiling when the user is already at the door', () => {
@@ -157,5 +164,53 @@ describe('frameFootprint for a walking overview', () => {
 
   it('has nothing to frame before the first fix', () => {
     expect(frameFootprint([], OVERVIEW)).toBeNull();
+  });
+
+  // T-3: the reframe left the user's puck off the top of the screen. Directions
+  // snaps to the walking network, so the route's first coordinate is not where
+  // the user is standing — framing the line alone silently drops them.
+  it('frames the user and the room, not just the snapped route', () => {
+    const room: LngLat = [-97.7340, 30.2820];
+    const user: LngLat = [-97.7398, 30.2861];
+    // Where Directions picked the walk up: on the path, ~45m south of the user.
+    const snapped: LngLat = [-97.7396, 30.2857];
+    const route: LngLat[] = [snapped, [-97.7380, 30.2840], [-97.7345, 30.2822]];
+
+    // The old behaviour: the route's own bounds do not reach the user.
+    const routeOnly = footprintBbox(route)!;
+    expect(user[1]).toBeGreaterThan(routeOnly.ne[1]);
+
+    // The fix — user and room go in alongside the line.
+    const points = [...route, user, room];
+    expect(framesAllOf(points)).toBe(true);
+    const framed = frameFootprint(points, OVERVIEW)!;
+    const bbox = footprintBbox(points)!;
+    expect(bbox.ne[1]).toBeGreaterThanOrEqual(user[1]);
+    expect(bbox.sw[0]).toBeLessThanOrEqual(user[0]);
+    expect(framed.zoom).toBeLessThan(frameFootprint(route, OVERVIEW)!.zoom);
+  });
+
+  // The reframe put the far end of a long walk behind the search bar. The
+  // header costs about a third of the usable height, so this is not a rounding
+  // difference — the camera has to be told about it.
+  it('frames below the header, not behind it', () => {
+    const withHeader = frameFootprint([SW, NE], OVERVIEW)!;
+    const ignoringHeader = frameFootprint([SW, NE], { ...OVERVIEW, paddingTop: 0 })!;
+    expect(withHeader.zoom).toBeLessThan(ignoringHeader.zoom);
+    expect(framesAllOf([SW, NE])).toBe(true);
+  });
+
+  // Why the inset is the dial for a tight frame and top padding is not: on a
+  // wide walk, width is the binding axis, so extra top padding leaves the zoom
+  // untouched and only slides the map down.
+  it('pulls back on both axes, where top padding only moves a wide walk', () => {
+    // Wide and short: width binds.
+    const wide: LngLat[] = [[-97.7450, 30.2820], [-97.7250, 30.2826]];
+    const base = frameFootprint(wide, OVERVIEW)!;
+    const morePaddingTop = frameFootprint(wide, { ...OVERVIEW, paddingTop: HEADER + 100 })!;
+    const moreInset = frameFootprint(wide, { ...OVERVIEW, inset: INSET + 24 })!;
+
+    expect(morePaddingTop.zoom).toBe(base.zoom);
+    expect(moreInset.zoom).toBeLessThan(base.zoom);
   });
 });

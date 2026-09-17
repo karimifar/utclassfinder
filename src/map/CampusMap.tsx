@@ -114,11 +114,28 @@ const BUILDING_MIN_ZOOM = 17.5;
 const BUILDING_MAX_ZOOM = 19.0;
 // Breathing room between the footprint and the edge of the framed area.
 const FRAME_INSET = 28;
+/**
+ * The same, for the walk overview — the dial for "fit it, but pull back a bit
+ * more".
+ *
+ * Its own constant rather than sharing FRAME_INSET, because the overview has to
+ * hold a whole walk between the header and the room panel while a building only
+ * has to hold one footprint, and because widening one should not silently
+ * reframe the other.
+ *
+ * Raise this to zoom out. It is the right dial for a frame that feels tight on
+ * any edge: it shrinks both axes, so it pulls back whichever one is binding.
+ * Adding top padding instead only zooms out when height is the binding axis —
+ * on a wide walk it leaves the zoom alone and just slides the map down, which
+ * buys room at the top by pushing the bottom under the panel.
+ */
+const OVERVIEW_INSET = 48;
 // Overview state frames the whole walk. The floor has to clear the longest walk
 // the app will even offer (MAX_WALK_METRES, 5km) — anything higher silently
-// crops the route instead of framing it. The ceiling keeps a user already at the
+// crops the route instead of framing it, and raising OVERVIEW_INSET eats into
+// the margin, so the two move together. The ceiling keeps a user already at the
 // door from slamming to room zoom and losing all context.
-const OVERVIEW_MIN_ZOOM = 12.0;
+const OVERVIEW_MIN_ZOOM = 11.5;
 const OVERVIEW_MAX_ZOOM = 18.0;
 
 
@@ -186,13 +203,18 @@ function buildingCamera(building: Building, animationDuration: number) {
  * a destination off-screen gave no clue which way it lay. Framing the walk end
  * to end answers "where am I going" before the user has to pan for it.
  */
-function overviewCamera(points: LngLat[], animationDuration: number) {
+function overviewCamera(points: LngLat[], animationDuration: number, paddingTop: number) {
   const win = Dimensions.get('window');
+  // Unlike the other cameras this one has to clear the header too. A walk can
+  // run the length of campus, so the framed box reaches the top of the screen
+  // and the far end of the route was disappearing behind the search bar.
+  const padding = { ...FOCUS_PADDING, paddingTop };
   const framed = frameFootprint(points, {
     width: win.width,
     height: win.height,
+    paddingTop,
     paddingBottom: FOCUS_PADDING.paddingBottom,
-    inset: FRAME_INSET,
+    inset: OVERVIEW_INSET,
     minZoom: OVERVIEW_MIN_ZOOM,
     maxZoom: OVERVIEW_MAX_ZOOM,
   });
@@ -203,7 +225,7 @@ function overviewCamera(points: LngLat[], animationDuration: number) {
     // Levelled, so returning here from navigate mode undoes the nav pitch.
     pitch: 0,
     heading: 0,
-    padding: FOCUS_PADDING,
+    padding,
     animationMode: 'flyTo' as const,
     animationDuration,
   };
@@ -226,6 +248,11 @@ interface Props {
   onFollowStateChange?: (disengaged: boolean) => void;
   navigateMode?: boolean;
   /**
+   * Height of the header chrome in points, so the overview camera can frame the
+   * walk below it. The screen computes this from its own safe-area insets.
+   */
+  headerHeight?: number;
+  /**
    * Simulated origin for walking directions. Null in production — see src/debug.ts.
    * When set, routes originate here instead of live GPS and the follow camera is
    * driven manually, because the real device is somewhere else entirely.
@@ -234,7 +261,7 @@ interface Props {
 }
 
 export const CampusMap = forwardRef<CampusMapHandle, Props>(
-  function CampusMap({ selectedRoom, selectedBuilding, selectedFloor, cameraRef, onUserLocation, onHeadingChange, onBuildingPress, onRoomPress, onRouteState, onNavProgress, onFollowStateChange, navigateMode, debugOrigin = null }, ref) {
+  function CampusMap({ selectedRoom, selectedBuilding, selectedFloor, cameraRef, onUserLocation, onHeadingChange, onBuildingPress, onRoomPress, onRouteState, onNavProgress, onFollowStateChange, navigateMode, headerHeight = 0, debugOrigin = null }, ref) {
     const mapRef = useRef<Mapbox.MapView>(null);
     const [geojsonUri, setGeojsonUri] = useState<string | null>(null);
     const [buildingsUri, setBuildingsUri] = useState<string | null>(null);
@@ -412,22 +439,28 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
     }, [navigateMode, route, selectedRoom, debugOrigin, hasFix]);
 
     /**
-     * The non-navigating camera for a selected room.
+     * The non-navigating camera for a selected room: the user, the room, and
+     * the path between them, all on screen at once.
      *
-     * Prefers the drawn route's own points over the two endpoints: the path
-     * bows around buildings, so framing just user-and-room can push part of the
-     * visible line off screen. Falls back to the room alone before the first
-     * GPS fix, when there is no walk to frame yet.
+     * All three are needed, not just the route. Directions snaps to the walking
+     * network at both ends, so the route's first coordinate can sit tens of
+     * metres from the actual GPS position and its last stops at the kerb rather
+     * than inside the building. Framing the line alone left the puck off the
+     * top of the screen. The route's own points still go in, because a path
+     * that rounds a building reaches past both of its endpoints.
      */
     const roomViewCamera = (room: RoomMatch, animationDuration: number) => {
       const current = routeRef.current;
       const origin = currentOrigin();
-      const points: LngLat[] | null = current
-        ? (current.geometry.coordinates as LngLat[])
-        : origin
-          ? [origin, room.center]
-          : null;
-      return (points && overviewCamera(points, animationDuration)) ?? roomCamera(room, animationDuration);
+      // Nothing to frame a walk from yet — sit on the room itself.
+      if (!current && !origin) return roomCamera(room, animationDuration);
+
+      const points: LngLat[] = [
+        ...(current ? (current.geometry.coordinates as LngLat[]) : []),
+        ...(origin ? [origin] : []),
+        room.center,
+      ];
+      return overviewCamera(points, animationDuration, headerHeight) ?? roomCamera(room, animationDuration);
     };
 
     /**

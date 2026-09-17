@@ -213,6 +213,7 @@ export default function Search() {
         onNavProgress={setNavProgress}
         onFollowStateChange={setFollowLost}
         navigateMode={navigateMode}
+        headerHeight={headerHeight}
         debugOrigin={debugOrigin}
       />
 
