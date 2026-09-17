@@ -92,3 +92,70 @@ describe('frameFootprint', () => {
     expect(frameFootprint([], OPTIONS)).toBeNull();
   });
 });
+
+describe('frameFootprint for a walking overview', () => {
+  // Matches overviewCamera in CampusMap: the same viewport and panel padding,
+  // but clamped for a whole walk rather than a single building.
+  const OVERVIEW = {
+    ...VIEWPORT,
+    paddingBottom: VIEWPORT.height * 0.3,
+    inset: 28,
+    minZoom: 12.0,
+    maxZoom: 18.0,
+  };
+  const AVAIL_W = VIEWPORT.width - 28 * 2;
+  const AVAIL_H = VIEWPORT.height - VIEWPORT.height * 0.3 - 28 * 2;
+
+  /**
+   * Everything is in frame exactly when the clamp didn't zoom in past the fit.
+   * The centre needs no check here — frameFootprint always centres on the bbox,
+   * which the case above pins down.
+   */
+  const framesAllOf = (points: LngLat[]) =>
+    frameFootprint(points, OVERVIEW)!.zoom <= fitZoom(footprintBbox(points)!, AVAIL_W, AVAIL_H);
+
+  // The far corners of CAMPUS_BOUNDS — about as long as a campus walk gets.
+  const NE: LngLat = [-97.722582, 30.294828];
+  const SW: LngLat = [-97.746697, 30.270204];
+
+  it('keeps both ends of a cross-campus walk in frame', () => {
+    const framed = frameFootprint([SW, NE], OVERVIEW)!;
+    // Centred on the pair, and never tighter than the zoom that just fits them:
+    // together those two are what containment means.
+    expect(framed.center).toEqual(bboxCenter(footprintBbox([SW, NE])!));
+    expect(framed.zoom).toBeLessThanOrEqual(fitZoom(footprintBbox([SW, NE])!, AVAIL_W, AVAIL_H));
+  });
+
+  // T-2: a floor of 14 framed anything past roughly 1.5km by cropping it. The
+  // floor has to clear the longest walk "Walk here" is willing to offer.
+  it('still frames the longest walk the app will offer', () => {
+    const from: LngLat = [-97.7400, 30.2820];
+    // ~5km east of `from` at this latitude — MAX_WALK_METRES.
+    const to: LngLat = [-97.7400 + 5000 / (111320 * Math.cos((30.282 * Math.PI) / 180)), 30.2820];
+    expect(framesAllOf([from, to])).toBe(true);
+  });
+
+  it('stops at the ceiling when the user is already at the door', () => {
+    const room: LngLat = [-97.7335, 30.2849];
+    const atTheDoor: LngLat = [room[0] + 0.00002, room[1] + 0.00002];
+    expect(frameFootprint([atTheDoor, room], OVERVIEW)!.zoom).toBe(18.0);
+  });
+
+  // Why the camera frames the route's own points rather than user-and-room: a
+  // path that rounds a building can reach past both of its endpoints, and
+  // framing only the ends leaves that stretch off screen.
+  it('pulls back for a route that doubles back past its own endpoints', () => {
+    const from: LngLat = [-97.7360, 30.2820];
+    const to: LngLat = [-97.7340, 30.2820];
+    // Heads west around a building before turning back east to the room.
+    const path: LngLat[] = [from, [-97.7380, 30.2822], to];
+    expect(frameFootprint(path, OVERVIEW)!.zoom).toBeLessThan(
+      frameFootprint([from, to], OVERVIEW)!.zoom,
+    );
+    expect(framesAllOf(path)).toBe(true);
+  });
+
+  it('has nothing to frame before the first fix', () => {
+    expect(frameFootprint([], OVERVIEW)).toBeNull();
+  });
+});

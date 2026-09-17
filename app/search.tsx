@@ -16,13 +16,14 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Path } from 'react-native-svg';
 import { initialsFromSession, useAuth } from '../src/auth/AuthContext';
-import { formatFloor, getBuildingById, sortedFloors } from '../src/data/buildings';
+import { floorLabel, floorLabels, floorPhrase, getBuildingById, sortedFloors } from '../src/data/buildings';
 import { getRoomById, getRoomsInBuilding, parseRoomCode, searchBuildings, searchRooms } from '../src/data/search';
 import type { Building, LngLat, RoomMatch, SearchMatch } from '../src/data/types';
 import { CAMPUS_DEBUG_ORIGIN, CONFIGURED_DEBUG_ORIGIN, DEBUG_TOOLS_ENABLED } from '../src/debug';
 import { openDirectionsToCoordinate } from '../src/directions';
 import { CampusMap, CampusMapHandle, NavProgress } from '../src/map/CampusMap';
 import { ARRIVAL_METRES, type RouteState } from '../src/map/routeState';
+import { formatDistance } from '../src/units';
 import { colors, radius, spacing } from '../src/theme';
 
 type AutocompleteItem =
@@ -99,9 +100,11 @@ export default function Search() {
   };
 
   const handleRoomPress = (roomId: string) => {
+    // Navigation owns the screen. A tap on a room the user happens to be
+    // walking past shouldn't throw away the trip they're in the middle of.
+    if (navigateMode) return;
     const room = getRoomById(roomId);
     if (!room) return;
-    setNavigateMode(false);
     setSelectedRoom(room);
     setSelectedFloor(room.floor);
     setQuery(room.roomNumber);
@@ -109,9 +112,9 @@ export default function Search() {
   };
 
   const handleBuildingPress = (buildingId: string) => {
+    if (navigateMode) return;
     const building = getBuildingById(buildingId);
     if (!building) return;
-    setNavigateMode(false);
     setSelectedRoom(null);
     setSelectedBuilding(building);
     setSelectedFloor(sortedFloors(building.floors)[0] ?? null);
@@ -188,6 +191,12 @@ export default function Search() {
   const dropdownTop = headerHeight + spacing.xs;
   const toolbarTop = headerHeight + spacing.sm;
   const floors = selectedBuilding ? sortedFloors(selectedBuilding.floors) : [];
+  // Built once per building: the labels depend on the whole floor list, since
+  // that's what decides whether two codes collide.
+  const floorNames = useMemo(
+    () => floorLabels(selectedBuilding?.floors ?? []),
+    [selectedBuilding],
+  );
 
   return (
     <View style={styles.container}>
@@ -355,7 +364,7 @@ export default function Search() {
                         {room.building.abbr} {room.roomNumber}
                       </Text>
                       <Text style={styles.rowSub} numberOfLines={1}>
-                        {titleCase(room.building.name)} · {formatFloor(room.floor)}
+                        {titleCase(room.building.name)} · {floorLabel(room.floor, room.building.floors)}
                       </Text>
                     </View>
                     <Text style={styles.chevron}>›</Text>
@@ -413,7 +422,7 @@ export default function Search() {
                   {selectedFloor === floor && <View style={styles.radioDot} />}
                 </View>
                 <Text style={[styles.floorLabel, selectedFloor === floor && styles.floorLabelSelected]}>
-                  {formatFloor(floor)}
+                  {floorNames.get(floor) ?? floor}
                 </Text>
               </Pressable>
             ))}
@@ -433,13 +442,13 @@ export default function Search() {
           <Text style={styles.roomBuilding} numberOfLines={1}>
             {titleCase(selectedRoom.building.name)}
           </Text>
-          <Text style={styles.roomFloor}>{formatFloor(selectedRoom.floor)}</Text>
+          <Text style={styles.roomFloor}>{floorLabel(selectedRoom.floor, selectedRoom.building.floors)}</Text>
 
           {/* Route status. Every outcome says something — a failed Directions
               call used to leave this blank indefinitely. */}
           {routeReady && (
             <Text style={styles.routeInfo}>
-              ~{Math.max(1, Math.round(routeReady.duration / 60))} min walk · {Math.round(routeReady.distance)} m
+              ~{Math.max(1, Math.round(routeReady.duration / 60))} min walk · {formatDistance(routeReady.distance)}
             </Text>
           )}
           {routeSettling && (
@@ -491,15 +500,27 @@ export default function Search() {
         </View>
       )}
 
-      {/* Arrival — the route can't go indoors, so this is where walking ends. */}
+      {/* Arrival — the route can't go indoors, so this is where walking ends.
+          The building tag and name repeat the building-state header, so the
+          hand-off from "walking there" to "find it inside" looks like the same
+          place rather than a new screen. */}
       {selectedRoom && navigateMode && arrived && (
         <View style={[styles.bottomPanel, { bottom: panelBottom }]}>
-          <Text style={styles.arrivalTitle}>
-            You've arrived at {selectedRoom.building.abbr}
-          </Text>
+          <Text style={styles.arrivalTitle}>{"🤘🏼 You've Arrived!"}</Text>
+
+          <View style={styles.panelHeader}>
+            <View style={styles.panelBadge}>
+              <Text style={styles.panelBadgeText}>{selectedRoom.building.abbr}</Text>
+            </View>
+            <Text style={styles.panelTitle} numberOfLines={1}>
+              {titleCase(selectedRoom.building.name)}
+            </Text>
+          </View>
+
           <Text style={styles.arrivalDetail}>
-            Room {selectedRoom.roomNumber} is on {formatFloor(selectedRoom.floor)}
+            Room {selectedRoom.roomNumber} is on {floorPhrase(selectedRoom.floor, selectedRoom.building.floors)}
           </Text>
+
           <Pressable style={styles.walkBtn} onPress={() => setNavigateMode(false)}>
             <Text style={styles.walkBtnText}>Done</Text>
           </Pressable>
@@ -525,7 +546,7 @@ export default function Search() {
             </Text>
             {routeReady && (
               <Text style={styles.navEta}>
-                ~{Math.max(1, Math.round(routeReady.duration / 60))} min · {Math.round(routeReady.distance)} m
+                ~{Math.max(1, Math.round(routeReady.duration / 60))} min · {formatDistance(routeReady.distance)}
               </Text>
             )}
           </View>
@@ -743,9 +764,10 @@ const styles = StyleSheet.create({
   walkBtnDisabled: { opacity: 0.45 },
   walkBtnText: { color: colors.white, fontWeight: '700', fontSize: 15 },
 
-  // Arrival card — replaces the nav bar in the last ~25m
-  arrivalTitle: { fontSize: 17, fontWeight: '700', color: colors.ink },
-  arrivalDetail: { fontSize: 14, color: colors.slate, marginTop: 2, marginBottom: spacing.md },
+  // Arrival card — replaces the nav bar in the last ~25m. Same box as every
+  // other panel; only the type is bigger, because this is the payoff.
+  arrivalTitle: { fontSize: 26, fontWeight: '800', color: colors.ink, marginBottom: spacing.md },
+  arrivalDetail: { fontSize: 16, color: colors.slate, marginBottom: spacing.md },
 
   debugBadge: {
     position: 'absolute',

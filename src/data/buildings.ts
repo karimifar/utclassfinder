@@ -28,6 +28,61 @@ export function formatFloor(code: string): string {
   return `Floor ${stripped}`;
 }
 
+/**
+ * Display labels for one building's floors, keyed by raw floor code.
+ *
+ * 65 of 538 buildings carry two floor series: the usual `01`, `02` and also
+ * `001`, `002`. Both strip to the same label, which showed FAC two rows both
+ * reading "Floor 1". They are genuinely different levels — no room number
+ * appears on both, and each is a full floor plate — but the dataset holds no
+ * descriptor saying what the `001` series *is*, so the raw code is appended
+ * rather than guessed at.
+ *
+ * The shorter code keeps the plain label, because `01` is the campus-wide norm
+ * (527 buildings) and `001` the exception (67).
+ */
+export function floorLabels(floors: string[]): Map<string, string> {
+  const grouped = new Map<string, string[]>();
+  for (const code of floors) {
+    const label = formatFloor(code);
+    const codes = grouped.get(label);
+    if (codes) codes.push(code);
+    else grouped.set(label, [code]);
+  }
+
+  const labels = new Map<string, string>();
+  for (const [label, codes] of grouped) {
+    if (codes.length === 1) {
+      labels.set(codes[0], label);
+      continue;
+    }
+    const [plain, ...rest] = [...codes].sort((a, b) => a.length - b.length || a.localeCompare(b));
+    labels.set(plain, label);
+    for (const code of rest) labels.set(code, `${label} (${code})`);
+  }
+  return labels;
+}
+
+/** One floor's label, disambiguated against the rest of its building. */
+export function floorLabel(code: string, floors: string[]): string {
+  return floorLabels(floors).get(code) ?? formatFloor(code);
+}
+
+/**
+ * `floorLabel` in sentence position — "Room 2.106 is on ...".
+ *
+ * The bare labels read fine standing alone in the floor switcher, but not mid
+ * sentence: "is on Ground", "is on Lower Level".
+ */
+export function floorPhrase(code: string, floors: string[]): string {
+  const base = formatFloor(code);
+  // '' normally, or ' (001)' where the label had to be disambiguated.
+  const suffix = floorLabel(code, floors).slice(base.length);
+  if (base === 'Ground') return `the Ground floor${suffix}`;
+  if (base === 'Lower Level') return `the Lower Level${suffix}`;
+  return `${base}${suffix}`;
+}
+
 export function sortedFloors(floors: string[]): string[] {
   return [...floors].sort((a, b) => floorSortKey(a) - floorSortKey(b));
 }
