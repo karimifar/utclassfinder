@@ -48,6 +48,19 @@ describe('useWalkingRoute', () => {
     );
   });
 
+  // Losing either of these is silent — a route still comes back, just a worse
+  // one. Without walkway_bias the router had no reason to prefer campus
+  // footpaths over the service roads beside them; without overview=full the
+  // geometry is decimated and stairs get drawn as a line across them.
+  it('asks for the pedestrian network and the undecimated geometry', async () => {
+    const { fetchImpl } = render();
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalled());
+    const url = String(fetchImpl.mock.calls[0][0]);
+    expect(url).toContain('/mapbox/walking/');
+    expect(url).toContain('walkway_bias=1');
+    expect(url).toContain('overview=full');
+  });
+
   // T-3 requirement 7: a room can be selected in the first second after launch,
   // long before Core Location has a fix. The route has to be requested once the
   // fix lands rather than left silently blank.

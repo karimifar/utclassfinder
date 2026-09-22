@@ -2,6 +2,19 @@ import { useEffect, useRef, useState } from 'react';
 import type { LngLat } from '../data/types';
 import { haversine, MAX_WALK_METRES, type RouteState } from './routeState';
 
+/**
+ * How hard to prefer the pedestrian network over roads, from -1 to 1.
+ *
+ * Campus is densely mapped — roughly 4,300 footways and 320 stairways inside
+ * the campus bounds — but it also carries about 1,000 service roads. At the
+ * default of 0 the router has no reason to favour a footway over a service
+ * road running alongside it, which is why routes ignored the walking-only
+ * paths and stairs people actually use.
+ *
+ * Mapbox treats bias as best-effort, so this nudges rather than guarantees.
+ */
+const WALKWAY_BIAS = 1;
+
 export interface WalkingRouteOptions {
   /** Where the user is walking to, or null when nothing is selected. */
   destination: LngLat | null;
@@ -89,7 +102,13 @@ export function useWalkingRoute({
     const doFetch = fetchRef.current ?? fetch;
     const [oLng, oLat] = origin;
     doFetch(
-      `https://api.mapbox.com/directions/v5/mapbox/walking/${oLng},${oLat};${destLng},${destLat}?geometries=geojson&access_token=${accessToken}`,
+      // overview=full because the default, `simplified`, decimates the
+      // geometry: a staircase is a short run of tight turns, and simplifying it
+      // into a straight segment drew a line that cut across the steps rather
+      // than following them — indistinguishable, on the map, from the router
+      // having skipped them.
+      `https://api.mapbox.com/directions/v5/mapbox/walking/${oLng},${oLat};${destLng},${destLat}` +
+        `?geometries=geojson&overview=full&walkway_bias=${WALKWAY_BIAS}&access_token=${accessToken}`,
       { signal: controller.signal },
     )
       .then((r) => r.json())
