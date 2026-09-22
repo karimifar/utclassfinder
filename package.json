@@ -10,6 +10,7 @@
     "build:data": "node scripts/build-buildings.mjs ../../buildings_rooms.geojson assets/data/buildings.json",
     "build:rooms": "node scripts/build-room-index.mjs",
     "build:nav-arrow": "node scripts/build-nav-arrow.mjs",
+    "build:room-pin": "node scripts/build-room-pin.mjs",
     "lint": "expo lint",
     "test": "jest",
     "test:broker": "node --test server/__tests__/",

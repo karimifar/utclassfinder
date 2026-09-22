@@ -8,8 +8,10 @@ import { BUILDINGS } from '../data/buildings';
 import type { Building, LngLat, RoomMatch } from '../data/types';
 import { colors } from '../theme';
 import { frameFootprint } from './framing';
+import { fixQuality, type FixQuality } from './fixQuality';
+import { shouldTurnCamera, smoothHeading } from './heading';
 import { initialRerouteState, nextRerouteState, type RerouteState } from './reroute';
-import { ARRIVAL_METRES, haversine, type RouteState } from './routeState';
+import { ARRIVAL_METRES, haversine, MAX_WALK_METRES, type RouteState } from './routeState';
 import { useWalkingRoute } from './useWalkingRoute';
 
 function splitRouteAtUser(
@@ -44,6 +46,15 @@ export interface CampusMapHandle {
   zoomIn: () => void;
   zoomOut: () => void;
   centerOnUser: () => void;
+  /**
+   * Re-frame the selected room — the same view selecting it produced.
+   *
+   * The room card stays up while the map is panned anywhere, so without this
+   * there is no way back to a selection once it is off screen.
+   */
+  focusSelectedRoom: () => void;
+  /** The same, for the building panel. */
+  focusSelectedBuilding: () => void;
 }
 
 /** Where the user is walking next, for the nav bar's arrow and arrival card. */
@@ -52,6 +63,12 @@ export interface NavProgress {
   bearing: number | null;
   /** Straight-line metres to the destination, or null when unknown. */
   distanceToDestination: number | null;
+  /**
+   * Radius of uncertainty of the fix these were measured from, in metres, or
+   * null when the platform reported none. Arrival is judged against it: a fix
+   * looser than the arrival radius cannot say whether we are inside it.
+   */
+  accuracy: number | null;
 }
 
 const token = Constants.expoConfig?.extra?.mapboxAccessToken as string | undefined;
@@ -106,6 +123,8 @@ const NAV_PADDING = {
 // the ground than 18 without losing the next turn off the top of the screen.
 const NAV_PITCH = 65;
 const NAV_ZOOM = 18.5;
+/** How long a recentre takes. Long enough to read as a move, short enough not to wait. */
+const RECENTER_MS = 450;
 const ROOM_ZOOM = 19;
 // Building state is framed to the footprint, but never outside this range:
 // 17.5 is where the floor-plan room labels switch on (see `floor-plan-labels`),
@@ -253,6 +272,11 @@ interface Props {
    */
   headerHeight?: number;
   /**
+   * Fires when the fix changes quality band — not on every tick, which would
+   * re-render the screen on every GPS update for no benefit.
+   */
+  onFixQualityChange?: (quality: FixQuality) => void;
+  /**
    * Simulated origin for walking directions. Null in production — see src/debug.ts.
    * When set, routes originate here instead of live GPS and the follow camera is
    * driven manually, because the real device is somewhere else entirely.
@@ -261,7 +285,7 @@ interface Props {
 }
 
 export const CampusMap = forwardRef<CampusMapHandle, Props>(
-  function CampusMap({ selectedRoom, selectedBuilding, selectedFloor, cameraRef, onUserLocation, onHeadingChange, onBuildingPress, onRoomPress, onRouteState, onNavProgress, onFollowStateChange, navigateMode, headerHeight = 0, debugOrigin = null }, ref) {
+  function CampusMap({ selectedRoom, selectedBuilding, selectedFloor, cameraRef, onUserLocation, onHeadingChange, onBuildingPress, onRoomPress, onRouteState, onNavProgress, onFollowStateChange, navigateMode, headerHeight = 0, onFixQualityChange, debugOrigin = null }, ref) {
     const mapRef = useRef<Mapbox.MapView>(null);
     const [geojsonUri, setGeojsonUri] = useState<string | null>(null);
     const [buildingsUri, setBuildingsUri] = useState<string | null>(null);
@@ -275,6 +299,21 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
     // Device compass heading, tracked only in navigate mode (it drives the
     // direction puck, and re-rendering the map on every heading tick is wasteful).
     const [userHeading, setUserHeading] = useState(0);
+    /**
+     * The bearing the camera is actually held at.
+     *
+     * Separate from `userHeading`, and deliberately staler: the puck follows the
+     * smoothed compass closely so fine movement still reads, while the map only
+     * turns once that has drifted past the deadband. Small movements wiggle the
+     * arrow and leave the map alone.
+     */
+    const [cameraHeading, setCameraHeading] = useState<number | null>(null);
+    const smoothedHeadingRef = useRef<number | null>(null);
+    const cameraHeadingRef = useRef<number | null>(null);
+    useEffect(() => { cameraHeadingRef.current = cameraHeading; }, [cameraHeading]);
+    /** Sequences the recentre: move by hand first, hand back to follow after. */
+    const recenterTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => () => { if (recenterTimer.current) clearTimeout(recenterTimer.current); }, []);
     // Bumped when the user strays off the line, which re-requests directions
     // from wherever they actually are now.
     const [rerouteSeq, setRerouteSeq] = useState(0);
@@ -282,10 +321,22 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
     const hasHadSelection = useRef(false);
     /** Live GPS only. The effective route origin is `debugOrigin ?? this`. */
     const userCoordsRef = useRef<[number, number] | null>(null);
+    /**
+     * The imperative handle is built once, so anything it reaches for has to be
+     * a ref or it freezes at the first render's value — and on that render the
+     * safe-area insets have not resolved, so headerHeight is still 0.
+     */
+    const headerHeightRef = useRef(headerHeight);
+    useEffect(() => { headerHeightRef.current = headerHeight; });
+    /** Radius of uncertainty of the newest fix, in metres. */
+    const accuracyRef = useRef<number | null>(null);
+    const fixQualityRef = useRef<FixQuality>('unknown');
     const navigateModeRef = useRef(navigateMode);
     useEffect(() => { navigateModeRef.current = navigateMode; }, [navigateMode]);
     const selectedRoomRef = useRef(selectedRoom);
     useEffect(() => { selectedRoomRef.current = selectedRoom; }, [selectedRoom]);
+    const selectedBuildingRef = useRef(selectedBuilding);
+    useEffect(() => { selectedBuildingRef.current = selectedBuilding; }, [selectedBuilding]);
     const debugOriginRef = useRef(debugOrigin);
     useEffect(() => { debugOriginRef.current = debugOrigin; }, [debugOrigin]);
 
@@ -295,6 +346,8 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
     useEffect(() => { onNavProgressRef.current = onNavProgress; });
     const onUserLocationRef = useRef(onUserLocation);
     useEffect(() => { onUserLocationRef.current = onUserLocation; });
+    const onFixQualityChangeRef = useRef(onFixQualityChange);
+    useEffect(() => { onFixQualityChangeRef.current = onFixQualityChange; });
 
     /** Origin for routing and for the nav bar: simulated if set, else live GPS. */
     const currentOrigin = (): [number, number] | null =>
@@ -338,28 +391,73 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
         const zoom = await mapRef.current?.getZoom();
         if (zoom != null) cameraRef.current?.zoomTo(zoom - 1, 200);
       },
+      focusSelectedRoom: () => {
+        const room = selectedRoomRef.current;
+        if (!room) return;
+        // Clear the frame key so the automatic pass does not decide this view is
+        // already current and skip it — an explicit tap always re-frames.
+        framedRef.current = null;
+        cameraRef.current?.setCamera(roomViewCamera(room, 500));
+      },
+      focusSelectedBuilding: () => {
+        const building = selectedBuildingRef.current;
+        if (!building) return;
+        framedRef.current = null;
+        cameraRef.current?.setCamera(buildingCamera(building, 500));
+      },
       centerOnUser: () => {
-        setDisengaged(false);
-        // In navigate mode the declarative follow camera owns the view, so
-        // re-arming it *is* the recentre. The imperative setCamera that used to
-        // run here put the camera back on the user but left follow detached, so
-        // the map froze at that heading and stopped tracking the compass for the
-        // rest of the trip.
-        //
-        // A simulated origin is the exception: follow is deliberately off there
-        // (real GPS is somewhere else entirely), so it still places by hand.
-        if (navigateModeRef.current && !debugOriginRef.current) return;
         const origin = currentOrigin();
+        const followed = navigateModeRef.current && !debugOriginRef.current;
+
+        if (!followed) {
+          // Nothing to hand back to — just move.
+          setDisengaged(false);
+          if (origin) {
+            cameraRef.current?.setCamera({
+              centerCoordinate: origin,
+              zoomLevel: navigateModeRef.current ? NAV_ZOOM : 17,
+              ...(navigateModeRef.current ? { pitch: NAV_PITCH, padding: NAV_PADDING } : {}),
+              animationDuration: RECENTER_MS,
+              animationMode: 'easeTo',
+            });
+          }
+          return;
+        }
+
+        // Re-arming the follow camera on its own looked wrong: rnmapbox hands
+        // the viewport its *default* transition, which arcs out and back, and
+        // then snaps the bearing immediately afterwards. Neither is controllable
+        // from here.
+        //
+        // So make the move ourselves — a straight easeTo from wherever the user
+        // has panned to, onto them — and only hand back to the follow camera
+        // once it is already sitting where it wants to be, leaving its own
+        // transition with nothing to animate.
         if (origin) {
           cameraRef.current?.setCamera({
             centerCoordinate: origin,
-            zoomLevel: navigateModeRef.current ? NAV_ZOOM : 17,
-            ...(navigateModeRef.current ? { pitch: NAV_PITCH, padding: NAV_PADDING } : {}),
-            animationDuration: 400,
-            animationMode: 'flyTo',
+            zoomLevel: NAV_ZOOM,
+            pitch: NAV_PITCH,
+            padding: NAV_PADDING,
+            // Hold the damped bearing, so recentring does not also spin the map.
+            ...(cameraHeadingRef.current != null ? { heading: cameraHeadingRef.current } : {}),
+            animationDuration: RECENTER_MS,
+            animationMode: 'easeTo',
           });
         }
+        if (recenterTimer.current) clearTimeout(recenterTimer.current);
+        recenterTimer.current = setTimeout(() => {
+          recenterTimer.current = null;
+          setDisengaged(false);
+        }, RECENTER_MS + 60);
       },
+      // Built once, deliberately: a handle rebuilt every render would hand the
+      // screen a new object on each GPS tick. Everything reached from in here —
+      // the selection, the route, the origin, headerHeight — goes through a ref
+      // for exactly that reason, so the first render's closure still reads
+      // current values. Adding roomViewCamera to the deps is not the fix; if
+      // something in here ever reads a prop directly, give it a ref instead.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }), [cameraRef]);
 
     useEffect(() => {
@@ -388,7 +486,7 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
     const reportNavProgress = (coords: [number, number]) => {
       const room = selectedRoomRef.current;
       if (!room) {
-        onNavProgressRef.current?.({ bearing: null, distanceToDestination: null });
+        onNavProgressRef.current?.({ bearing: null, distanceToDestination: null, accuracy: null });
         return;
       }
       const current = routeRef.current;
@@ -404,6 +502,10 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
       onNavProgressRef.current?.({
         bearing,
         distanceToDestination: haversine(coords, room.center),
+        // A simulated origin is exactly where it says it is. Reporting the real
+        // device's uncertainty here would judge a synthetic distance against an
+        // unrelated fix, and a poor one indoors would block arrival outright.
+        accuracy: debugOriginRef.current ? 0 : accuracyRef.current,
       });
     };
 
@@ -412,6 +514,7 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
       const room = selectedRoomRef.current;
       const { state, reroute } = nextRerouteState(rerouteState.current, {
         offBy,
+        accuracy: accuracyRef.current,
         coords,
         arrived: room != null && haversine(coords, room.center) <= ARRIVAL_METRES,
         now: Date.now(),
@@ -430,7 +533,7 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
 
     useEffect(() => {
       if (!navigateMode) {
-        onNavProgressRef.current?.({ bearing: null, distanceToDestination: null });
+        onNavProgressRef.current?.({ bearing: null, distanceToDestination: null, accuracy: null });
         return;
       }
       const origin = currentOrigin();
@@ -448,19 +551,29 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
      * than inside the building. Framing the line alone left the puck off the
      * top of the screen. The route's own points still go in, because a path
      * that rounds a building reaches past both of its endpoints.
+     *
+     * An origin too far away to walk from is left out entirely. There is no
+     * walk to frame, and including it makes a box spanning the whole distance —
+     * which the OVERVIEW_MIN_ZOOM clamp then pulls *in* to a view holding
+     * neither the user nor the room, somewhere in the empty middle. That clamp
+     * is only ever safe within MAX_WALK_METRES; this is what keeps it there.
+     *
+     * Measured rather than read off routeState, which arrives a network round
+     * trip later — by then the bad camera has already flown.
      */
     const roomViewCamera = (room: RoomMatch, animationDuration: number) => {
       const current = routeRef.current;
       const origin = currentOrigin();
-      // Nothing to frame a walk from yet — sit on the room itself.
-      if (!current && !origin) return roomCamera(room, animationDuration);
+      const walkable = origin != null && haversine(origin, room.center) <= MAX_WALK_METRES;
+      // No walk to frame — sit on the room itself.
+      if (!current && !walkable) return roomCamera(room, animationDuration);
 
       const points: LngLat[] = [
         ...(current ? (current.geometry.coordinates as LngLat[]) : []),
-        ...(origin ? [origin] : []),
+        ...(walkable && origin ? [origin] : []),
         room.center,
       ];
-      return overviewCamera(points, animationDuration, headerHeight) ?? roomCamera(room, animationDuration);
+      return overviewCamera(points, animationDuration, headerHeightRef.current) ?? roomCamera(room, animationDuration);
     };
 
     /**
@@ -497,6 +610,10 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
         setRemainingRoute({ type: 'Feature', properties: {}, geometry: route.geometry });
         setWalkedRoute(null);
       } else if (!navigateMode) {
+        // Leaving navigation drops the damped bearing, so the next trip starts
+        // from the compass rather than from wherever the last one ended.
+        smoothedHeadingRef.current = null;
+        setCameraHeading(null);
         setWalkedRoute(null);
         setRemainingRoute(null);
         if (wasNavigating.current) {
@@ -660,17 +777,23 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
             onUserTrackingModeChange={(e) => {
               if (navigateModeRef.current && !e.nativeEvent.payload.followUserLocation) setDisengaged(true);
             }}
-            // Heading, not course: course is the GPS direction of travel, which
-            // is undefined standing still and lags badly at walking pace, so the
-            // map stayed put while the user turned on the spot. Heading is the
-            // compass, so turning the phone turns the map.
-            followUserMode={UserTrackingMode.FollowWithHeading}
+            // Plain Follow, not FollowWithHeading. FollowWithHeading wires the
+            // camera straight to the compass with no filtering available, so
+            // every few degrees of noise moved the map. Follow leaves the
+            // bearing alone and `followHeading` below supplies a damped one.
+            followUserMode={UserTrackingMode.Follow}
+            followHeading={navigateMode && cameraHeading != null ? cameraHeading : undefined}
             followPitch={NAV_PITCH}
             followZoomLevel={NAV_ZOOM}
             followPadding={NAV_PADDING}
           />
 
-          <Mapbox.Images images={{ 'nav-arrow': require('../../assets/Visuals/nav-arrow.png') }} />
+          <Mapbox.Images
+            images={{
+              'nav-arrow': require('../../assets/Visuals/nav-arrow.png'),
+              'room-pin': require('../../assets/Visuals/room-pin.png'),
+            }}
+          />
 
           {buildingsUri && (
             <Mapbox.ShapeSource
@@ -740,7 +863,7 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
                 style={{
                   textField: 'WC',
                   textFont: ['DIN Offc Pro Bold', 'Arial Unicode MS Bold'],
-                  textSize: 10,
+                  textSize: ['interpolate', ['linear'], ['zoom'], 17.5, 10, 21, 15] as any,
                   textColor: colors.white,
                   textHaloColor: colors.bathroomLine,
                   textHaloWidth: 2,
@@ -754,7 +877,14 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
                 minZoomLevel={17.5}
                 style={{
                   textField: roomLabelExpr,
-                  textSize: 9,
+                  // Grows with zoom rather than sitting at a flat 9: the rooms
+                  // get bigger as you zoom in and the labels used to stay put,
+                  // ending up tiny inside a large floor plan. It starts near
+                  // the old size so the 17.5 view gains no new label
+                  // collisions — `textAllowOverlap` is false, so larger text
+                  // means Mapbox drops more of them — and earns its size
+                  // higher up, where there is room to spare.
+                  textSize: ['interpolate', ['linear'], ['zoom'], 17.5, 10, 21, 19] as any,
                   textColor: colors.ink,
                   textHaloColor: colors.white,
                   textHaloWidth: 1,
@@ -778,7 +908,10 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
                 filter={roomFilter}
                 style={{
                   textField: roomLabelExpr,
-                  textSize: 13,
+                  // Tracks the floor-plan labels but stays above them, so the
+                  // room you actually picked never ends up smaller than the
+                  // ones around it.
+                  textSize: ['interpolate', ['linear'], ['zoom'], 17.5, 13, 21, 20] as any,
                   textColor: colors.white,
                   textFont: ['DIN Offc Pro Bold', 'Arial Unicode MS Bold'],
                   textHaloColor: colors.burntOrangeDark,
@@ -886,19 +1019,33 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
               />
             </Mapbox.ShapeSource>
           )}
-          {navigateMode && selectedRoom && (
+          {/* The selected room, marked in screen space. The polygon underneath
+              is already burnt orange, but a room is a few metres across — by
+              campus zoom it is gone entirely, which is what made a selection
+              impossible to find after zooming out.
+
+              Shown in navigate mode too, replacing the flat destination dot
+              that used to live here, so the destination looks the same before
+              and during the walk. */}
+          {selectedRoom && (
             <Mapbox.ShapeSource
-              id="nav-destination"
+              id="room-marker"
               shape={{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: selectedRoom.center } }}
             >
-              <Mapbox.CircleLayer
-                id="nav-destination-dot"
+              <Mapbox.SymbolLayer
+                id="room-marker-pin"
                 style={{
-                  circleRadius: 8,
-                  circleColor: colors.burntOrange,
-                  circleStrokeColor: colors.white,
-                  circleStrokeWidth: 2.5,
-                  circlePitchAlignment: 'map',
+                  iconImage: 'room-pin',
+                  // The tip is the point being marked, not the middle.
+                  iconAnchor: 'bottom',
+                  // Eases off as the floor plan takes over: close in, the
+                  // polygon says where the room is and a full-size pin just
+                  // covers it.
+                  iconSize: ['interpolate', ['linear'], ['zoom'], 15, 1, 19, 0.72] as any,
+                  // Never let label collision drop the one thing the user asked
+                  // to see.
+                  iconAllowOverlap: true,
+                  iconIgnorePlacement: true,
                 }}
               />
             </Mapbox.ShapeSource>
@@ -911,14 +1058,32 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
             onUpdate={(loc) => {
               const coords: [number, number] = [loc.coords.longitude, loc.coords.latitude];
               userCoordsRef.current = coords;
+              // Radius of uncertainty, in metres. Routing, rerouting and
+              // arrival are all judged against it; ignoring it meant a 500m
+              // fix was trusted exactly as much as a 5m one.
+              accuracyRef.current = loc.coords.accuracy ?? null;
+              // Only on a band change — this reaches the screen, and firing it
+              // on every tick would re-render the whole UI for nothing.
+              const quality = fixQuality(accuracyRef.current);
+              if (quality !== fixQualityRef.current) {
+                fixQualityRef.current = quality;
+                onFixQualityChangeRef.current?.(quality);
+              }
               if (!hasFix) setHasFix(true);
               // Report the *effective* origin, so the nav bar and arrival check
               // agree with whatever the route was actually drawn from.
               onUserLocationRef.current?.(debugOriginRef.current ?? coords);
 
               if (navigateModeRef.current) {
-                const heading = Math.round(loc.coords.heading ?? loc.coords.course ?? 0);
+                const raw = loc.coords.heading ?? loc.coords.course ?? 0;
+                const smoothed = smoothHeading(smoothedHeadingRef.current, raw);
+                smoothedHeadingRef.current = smoothed;
+                const heading = Math.round(smoothed);
                 setUserHeading((prev) => (prev === heading ? prev : heading));
+                // The map turns only on a real turn — see src/map/heading.ts.
+                setCameraHeading((prev) =>
+                  shouldTurnCamera(prev, smoothed) ? smoothed : prev,
+                );
                 // With a simulated origin the device is nowhere near the route,
                 // so splitting it at the real position would erase the line.
                 if (!debugOriginRef.current) {

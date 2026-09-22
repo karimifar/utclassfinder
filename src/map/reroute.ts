@@ -1,4 +1,5 @@
 import type { LngLat } from '../data/types';
+import { fixSupports } from './fixQuality';
 import { haversine } from './routeState';
 
 /**
@@ -36,6 +37,11 @@ export const initialRerouteState: RerouteState = { fixes: 0, lastAt: null, lastP
 export interface RerouteInput {
   /** Perpendicular distance from the route line, in metres. */
   offBy: number;
+  /**
+   * Radius of uncertainty of the fix `offBy` was measured from, in metres, or
+   * null when the platform reported none.
+   */
+  accuracy: number | null;
   coords: LngLat;
   /**
    * Arrival is excluded: the route stops at the building door while the room is
@@ -53,9 +59,12 @@ export interface RerouteInput {
  */
 export function nextRerouteState(
   state: RerouteState,
-  { offBy, coords, arrived, now }: RerouteInput,
+  { offBy, accuracy, coords, arrived, now }: RerouteInput,
 ): { state: RerouteState; reroute: boolean } {
-  if (arrived || offBy <= OFF_ROUTE_METRES) {
+  // A fix uncertain by more than OFF_ROUTE_METRES cannot tell us we have
+  // strayed that far — the reading is inside its own error bar. Without this,
+  // a wobbly fix between tall buildings throws away a perfectly good route.
+  if (arrived || offBy <= OFF_ROUTE_METRES || !fixSupports(accuracy, OFF_ROUTE_METRES)) {
     return { state: { ...state, fixes: 0 }, reroute: false };
   }
 

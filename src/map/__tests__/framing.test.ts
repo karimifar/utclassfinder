@@ -190,6 +190,19 @@ describe('frameFootprint for a walking overview', () => {
     expect(framed.zoom).toBeLessThan(frameFootprint(route, OVERVIEW)!.zoom);
   });
 
+  // T-4: selecting a room from out of town flew the camera to empty country
+  // between the two. Past MAX_WALK_METRES the true fit drops below the floor,
+  // so the clamp pulls the camera back *in* and the frame holds neither end.
+  // The floor is only ever safe inside walking range — which is why
+  // roomViewCamera drops an unwalkable origin instead of framing it.
+  it('cannot hold a pair beyond the longest walk, so callers must not ask', () => {
+    const campus: LngLat = [-97.7400, 30.2820];
+    const dallas: LngLat = [-96.7970, 32.7767];
+    expect(framesAllOf([campus, dallas])).toBe(false);
+    // Clamped to the floor, nowhere near the ~7.8 that would actually fit it.
+    expect(frameFootprint([campus, dallas], OVERVIEW)!.zoom).toBe(11.5);
+  });
+
   // The reframe put the far end of a long walk behind the search bar. The
   // header costs about a third of the usable height, so this is not a rounding
   // difference — the camera has to be told about it.

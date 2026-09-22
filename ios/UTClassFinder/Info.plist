@@ -22,6 +22,13 @@
     <string>0.1.0</string>
     <key>CFBundleSignature</key>
     <string>????</string>
+    <key>LSApplicationQueriesSchemes</key>
+    <array>
+      <!-- Required for Linking.canOpenURL to answer truthfully: iOS reports an
+           undeclared scheme as unavailable even when the app is installed, so
+           without this the Google Maps button would never appear for anyone. -->
+      <string>comgooglemaps</string>
+    </array>
     <key>CFBundleURLTypes</key>
     <array>
       <dict>

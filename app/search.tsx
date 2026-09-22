@@ -1,5 +1,5 @@
 import Mapbox from '@rnmapbox/maps';
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -20,8 +20,9 @@ import { floorLabel, floorLabels, floorPhrase, getBuildingById, sortedFloors } f
 import { getRoomById, getRoomsInBuilding, parseRoomCode, searchBuildings, searchRooms } from '../src/data/search';
 import type { Building, LngLat, RoomMatch, SearchMatch } from '../src/data/types';
 import { CAMPUS_DEBUG_ORIGIN, CONFIGURED_DEBUG_ORIGIN, DEBUG_TOOLS_ENABLED } from '../src/debug';
-import { openDirectionsToCoordinate } from '../src/directions';
+import { appleMapsAvailable, googleMapsAvailable, openInAppleMaps, openInGoogleMaps } from '../src/directions';
 import { CampusMap, CampusMapHandle, NavProgress } from '../src/map/CampusMap';
+import { fixSupports, type FixQuality } from '../src/map/fixQuality';
 import { ARRIVAL_METRES, type RouteState } from '../src/map/routeState';
 import { formatDistance } from '../src/units';
 import { colors, radius, spacing } from '../src/theme';
@@ -29,10 +30,6 @@ import { colors, radius, spacing } from '../src/theme';
 type AutocompleteItem =
   | { kind: 'building'; match: SearchMatch }
   | { kind: 'room'; room: RoomMatch };
-
-// A building is already scoped, so 8 results is tight for a query like "2".
-// The list scrolls past 5 rows anyway.
-const IN_BUILDING_RESULT_LIMIT = 20;
 
 export default function Search() {
   const insets = useSafeAreaInsets();
@@ -48,9 +45,24 @@ export default function Search() {
   const [showResults, setShowResults] = useState(false);
   const [mapHeading, setMapHeading] = useState(0);
   const [routeState, setRouteState] = useState<RouteState>({ status: 'idle' });
-  const [navProgress, setNavProgress] = useState<NavProgress>({ bearing: null, distanceToDestination: null });
+  const [navProgress, setNavProgress] = useState<NavProgress>({ bearing: null, distanceToDestination: null, accuracy: null });
   const [navigateMode, setNavigateMode] = useState(false);
   const [followLost, setFollowLost] = useState(false);
+  // Only changes when the fix crosses a quality band, so this costs one render
+  // a session rather than one per GPS tick.
+  const [fixBand, setFixBand] = useState<FixQuality>('unknown');
+  // Measured rather than assumed: the arrival card's height depends on the
+  // building name wrapping, and the toolbar has to clear whatever it turns out
+  // to be.
+  const [arrivalHeight, setArrivalHeight] = useState(0);
+  // Whether to offer Google Maps at all. Asked once: the answer only changes if
+  // the user installs or removes it, which they cannot do without leaving.
+  const [hasGoogleMaps, setHasGoogleMaps] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    googleMapsAvailable().then((ok) => { if (!cancelled) setHasGoogleMaps(ok); });
+    return () => { cancelled = true; };
+  }, []);
   // Simulated route origin, so navigation is testable from off campus. Seeded
   // from the build config; the long-press toggle below can also set it at
   // runtime, but only in builds that opted in. See src/debug.ts.
@@ -59,11 +71,15 @@ export default function Search() {
   const items: AutocompleteItem[] = useMemo(() => {
     const q = query.trim();
     if (selectedBuilding) {
-      // An empty query would return the building's first N rooms unranked —
-      // an unfiltered dump the moment you enter building state. The floor
-      // switcher is the entry point there; the list appears once you type.
-      if (!q) return [];
-      return getRoomsInBuilding(selectedBuilding.id, q, IN_BUILDING_RESULT_LIMIT).map(
+      // Empty query included: tapping the search bar inside a building offers
+      // that building's rooms to browse. This used to return nothing, on the
+      // grounds that an empty query produced an unranked dump — true when the
+      // rooms came back in source order, but getRoomsInBuilding now orders them
+      // by floor and number, which is a list worth showing.
+      // No cap: the dropdown virtualises, so the whole building costs the same
+      // to render as twenty of it, and a cap just hides rooms someone is
+      // scrolling to find.
+      return getRoomsInBuilding(selectedBuilding.id, q).map(
         (room) => ({ kind: 'room' as const, room }),
       );
     }
@@ -81,9 +97,21 @@ export default function Search() {
     if (!text.trim() && !selectedBuilding) setSelectedRoom(null);
   };
 
-  const handleSelect = (item: AutocompleteItem) => {
+  /**
+   * Put the search box away.
+   *
+   * Every transition that changes what the map is showing calls this. Only
+   * handleSelect used to, so opening the keyboard and then navigating any other
+   * way — a map tap, the back arrow, a floor — left it covering half the screen
+   * with nothing to dismiss it.
+   */
+  const leaveSearch = () => {
     Keyboard.dismiss();
     setShowResults(false);
+  };
+
+  const handleSelect = (item: AutocompleteItem) => {
+    leaveSearch();
     setNavigateMode(false);
     if (item.kind === 'room') {
       setSelectedRoom(item.room);
@@ -105,6 +133,7 @@ export default function Search() {
     if (navigateMode) return;
     const room = getRoomById(roomId);
     if (!room) return;
+    leaveSearch();
     setSelectedRoom(room);
     setSelectedFloor(room.floor);
     setQuery(room.roomNumber);
@@ -115,6 +144,7 @@ export default function Search() {
     if (navigateMode) return;
     const building = getBuildingById(buildingId);
     if (!building) return;
+    leaveSearch();
     setSelectedRoom(null);
     setSelectedBuilding(building);
     setSelectedFloor(sortedFloors(building.floors)[0] ?? null);
@@ -123,6 +153,7 @@ export default function Search() {
   };
 
   const handleBack = () => {
+    leaveSearch();
     if (navigateMode) {
       setNavigateMode(false);
       return;
@@ -144,6 +175,7 @@ export default function Search() {
   const handleClearQuery = () => {
     if (selectedRoom) {
       // In room state, X = go all the way back to zero state
+      leaveSearch();
       setSelectedRoom(null);
       setNavigateMode(false);
       setSelectedBuilding(null);
@@ -173,9 +205,17 @@ export default function Search() {
   // and the route effect refires when it lands.
   const routeSettling = routeState.status === 'pending' || routeFailure === 'no-location';
   const unwalkable = routeFailure === 'too-far' || routeFailure === 'no-route';
+  // Arrival ends navigation and replaces the nav bar, so a fix too coarse to
+  // place the user inside the arrival radius must not trigger it — otherwise a
+  // bad fix ends the trip from across the street.
   const arrived =
     navProgress.distanceToDestination !== null &&
-    navProgress.distanceToDestination <= ARRIVAL_METRES;
+    navProgress.distanceToDestination <= ARRIVAL_METRES &&
+    fixSupports(navProgress.accuracy, ARRIVAL_METRES);
+
+  const roomLabel = selectedRoom
+    ? `${selectedRoom.building.abbr} ${selectedRoom.roomNumber}`
+    : 'Destination';
 
   const toggleDebugOrigin = () => {
     if (!DEBUG_TOOLS_ENABLED) return;
@@ -189,7 +229,13 @@ export default function Search() {
   const footerHeight = insets.bottom + 32 + spacing.sm;
   const panelBottom = footerHeight + spacing.sm;
   const dropdownTop = headerHeight + spacing.xs;
-  const toolbarTop = headerHeight + spacing.sm;
+  const arrivalTop = headerHeight + spacing.sm;
+  // The arrival card sits where the toolbar normally does, so the toolbar drops
+  // below it for the one screen where both are up.
+  const toolbarTop =
+    arrived && arrivalHeight > 0
+      ? arrivalTop + arrivalHeight + spacing.sm
+      : headerHeight + spacing.sm;
   const floors = selectedBuilding ? sortedFloors(selectedBuilding.floors) : [];
   // Built once per building: the labels depend on the whole floor list, since
   // that's what decides whether two codes collide.
@@ -212,6 +258,7 @@ export default function Search() {
         onRouteState={setRouteState}
         onNavProgress={setNavProgress}
         onFollowStateChange={setFollowLost}
+        onFixQualityChange={setFixBand}
         navigateMode={navigateMode}
         headerHeight={headerHeight}
         debugOrigin={debugOrigin}
@@ -400,14 +447,21 @@ export default function Search() {
       {/* Building state — floor switcher panel */}
       {selectedBuilding && !selectedRoom && floors.length > 0 && (
         <View style={[styles.bottomPanel, { bottom: panelBottom }]}>
-          <View style={styles.panelHeader}>
+          {/* Same as the room card: the panel outlives whatever the map is
+              showing, so its header is the way back to the building. */}
+          <Pressable
+            onPress={() => mapHandle.current?.focusSelectedBuilding()}
+            style={({ pressed }) => [styles.panelHeader, pressed && styles.panelHeaderPressed]}
+            accessibilityRole="button"
+            accessibilityLabel={`Show ${selectedBuilding.abbr} on the map`}
+          >
             <View style={styles.panelBadge}>
               <Text style={styles.panelBadgeText}>{selectedBuilding.abbr}</Text>
             </View>
             <Text style={styles.panelTitle} numberOfLines={1}>
               {titleCase(selectedBuilding.name)}
             </Text>
-          </View>
+          </Pressable>
           <ScrollView
             showsVerticalScrollIndicator={false}
             style={styles.floorList}
@@ -417,7 +471,10 @@ export default function Search() {
               <Pressable
                 key={floor}
                 style={styles.floorRow}
-                onPress={() => setSelectedFloor(floor)}
+                onPress={() => {
+                  leaveSearch();
+                  setSelectedFloor(floor);
+                }}
               >
                 <View style={[styles.radio, selectedFloor === floor && styles.radioSelected]}>
                   {selectedFloor === floor && <View style={styles.radioDot} />}
@@ -434,12 +491,20 @@ export default function Search() {
       {/* Room state — info panel with two CTAs */}
       {selectedRoom && !navigateMode && (
         <View style={[styles.bottomPanel, { bottom: panelBottom }]}>
-          <View style={styles.panelHeader}>
+          {/* The card stays up wherever the map is panned, so the room code
+              doubles as the way back to it. Without this, panning away from a
+              selection left no route back to it at all. */}
+          <Pressable
+            onPress={() => mapHandle.current?.focusSelectedRoom()}
+            style={({ pressed }) => [styles.panelHeader, pressed && styles.panelHeaderPressed]}
+            accessibilityRole="button"
+            accessibilityLabel={`Show ${selectedRoom.building.abbr} ${selectedRoom.roomNumber} on the map`}
+          >
             <View style={styles.panelBadge}>
               <Text style={styles.panelBadgeText}>{selectedRoom.building.abbr}</Text>
             </View>
             <Text style={styles.roomNumber}>{selectedRoom.roomNumber}</Text>
-          </View>
+          </Pressable>
           <Text style={styles.roomBuilding} numberOfLines={1}>
             {titleCase(selectedRoom.building.name)}
           </Text>
@@ -466,6 +531,16 @@ export default function Search() {
           {routeFailure === 'no-permission' && (
             <Text style={styles.routeNotice}>Enable location to get walking directions</Text>
           )}
+          {/* No API reports whether the user granted Precise Location — the
+              permission response carries only its scope — so this is inferred
+              from a fix radius far too wide to be GPS. */}
+          {fixBand === 'reduced' && routeFailure !== 'no-permission' && (
+            <Pressable onPress={() => Linking.openSettings()}>
+              <Text style={styles.routeNotice}>
+                Turn on Precise Location for accurate directions
+              </Text>
+            </Pressable>
+          )}
           {routeFailure === 'failed' && (
             <Text style={styles.routeNotice}>Couldn't load walking directions</Text>
           )}
@@ -478,35 +553,55 @@ export default function Search() {
             <Pressable
               style={[styles.walkBtn, routeSettling && styles.walkBtnDisabled]}
               disabled={routeSettling}
-              onPress={() => setNavigateMode(true)}
+              onPress={() => {
+                leaveSearch();
+                setNavigateMode(true);
+              }}
             >
               <Text style={styles.walkBtnText}>Walk here</Text>
             </Pressable>
           ) : null}
 
-          {/* Promoted to the primary action when there's no walking route. */}
-          <Pressable
-            style={unwalkable || routeFailure === 'failed' ? styles.walkBtn : styles.mapsBtn}
-            onPress={() =>
-              openDirectionsToCoordinate(
-                selectedRoom.center,
-                `${selectedRoom.building.abbr} ${selectedRoom.roomNumber}`,
-              )
-            }
-          >
-            <Text style={unwalkable || routeFailure === 'failed' ? styles.walkBtnText : styles.mapsBtnText}>
-              Open in Maps
-            </Text>
-          </Pressable>
+          {/* Hand-off to a maps app. Named rather than a generic "Open in
+              Maps", because on iOS that silently meant Apple Maps and there was
+              no way to choose. Google only appears when it is installed —
+              offering an app the user does not have is worse than not offering
+              the choice. Both stay secondary: they are a way out, not the
+              thing this card is for. */}
+          <View style={styles.mapsRow}>
+            {appleMapsAvailable() && (
+              <Pressable
+                style={[styles.mapsBtn, styles.mapsRowBtn]}
+                onPress={() => openInAppleMaps(selectedRoom.center, roomLabel)}
+              >
+                <Text style={styles.mapsBtnText}>Apple Maps</Text>
+              </Pressable>
+            )}
+            {hasGoogleMaps && (
+              <Pressable
+                style={[styles.mapsBtn, styles.mapsRowBtn]}
+                onPress={() => openInGoogleMaps(selectedRoom.center, roomLabel)}
+              >
+                <Text style={styles.mapsBtnText}>Google Maps</Text>
+              </Pressable>
+            )}
+          </View>
         </View>
       )}
 
       {/* Arrival — the route can't go indoors, so this is where walking ends.
+          Sits at the top: once you have arrived, the room on the map matters
+          more than the card, and a bottom panel covers exactly the ground the
+          nav camera puts the destination on.
+
           The building tag and name repeat the building-state header, so the
           hand-off from "walking there" to "find it inside" looks like the same
           place rather than a new screen. */}
       {selectedRoom && navigateMode && arrived && (
-        <View style={[styles.bottomPanel, { bottom: panelBottom }]}>
+        <View
+          style={[styles.bottomPanel, styles.arrivalPanel, { top: arrivalTop }]}
+          onLayout={(e) => setArrivalHeight(e.nativeEvent.layout.height)}
+        >
           <Text style={styles.arrivalTitle}>{"🤘🏼 You've Arrived!"}</Text>
 
           <View style={styles.panelHeader}>
@@ -522,7 +617,13 @@ export default function Search() {
             Room {selectedRoom.roomNumber} is on {floorPhrase(selectedRoom.floor, selectedRoom.building.floors)}
           </Text>
 
-          <Pressable style={styles.walkBtn} onPress={() => setNavigateMode(false)}>
+          <Pressable
+            style={styles.walkBtn}
+            onPress={() => {
+              leaveSearch();
+              setNavigateMode(false);
+            }}
+          >
             <Text style={styles.walkBtnText}>Done</Text>
           </Pressable>
         </View>
@@ -551,7 +652,13 @@ export default function Search() {
               </Text>
             )}
           </View>
-          <Pressable style={styles.navEnd} onPress={() => setNavigateMode(false)}>
+          <Pressable
+            style={styles.navEnd}
+            onPress={() => {
+              leaveSearch();
+              setNavigateMode(false);
+            }}
+          >
             <Text style={styles.navEndText}>End</Text>
           </Pressable>
         </View>
@@ -705,6 +812,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: colors.line,
   },
+  panelHeaderPressed: { opacity: 0.55 },
   panelBadge: {
     backgroundColor: colors.burntOrange,
     borderRadius: radius.sm,
@@ -767,6 +875,8 @@ const styles = StyleSheet.create({
 
   // Arrival card — replaces the nav bar in the last ~25m. Same box as every
   // other panel; only the type is bigger, because this is the payoff.
+  // Shadow falls downward here, unlike the bottom panels it borrows from.
+  arrivalPanel: { shadowOffset: { width: 0, height: 1 } },
   arrivalTitle: { fontSize: 26, fontWeight: '800', color: colors.ink, marginBottom: spacing.md },
   arrivalDetail: { fontSize: 16, color: colors.slate, marginBottom: spacing.md },
 
@@ -779,6 +889,9 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xs,
   },
   debugBadgeText: { color: colors.sunshine, fontSize: 11, fontWeight: '800', letterSpacing: 0.5 },
+  // Side by side when both apps are offered; a lone button still fills the row.
+  mapsRow: { flexDirection: 'row', gap: spacing.sm },
+  mapsRowBtn: { flex: 1 },
   mapsBtn: {
     borderWidth: 1.5,
     borderColor: colors.burntOrange,

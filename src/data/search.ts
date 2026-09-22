@@ -1,4 +1,4 @@
-import { BUILDINGS, getBuildingByAbbr, getBuildingById } from './buildings';
+import { BUILDINGS, floorSortKey, getBuildingByAbbr, getBuildingById } from './buildings';
 import type { Building, RoomMatch, SearchMatch } from './types';
 
 type RoomIndexEntry = {
@@ -112,16 +112,31 @@ export function parseRoomCode(raw: string): {
 }
 
 /**
- * Return rooms within a specific building, optionally filtered by a room token prefix.
- * Empty token returns the first `limit` rooms (sorted as stored).
+ * Rooms within a specific building, optionally filtered by a room token prefix.
+ * An empty token returns them ordered by floor, then room number — the list the
+ * search bar offers for browsing a building.
+ *
+ * `limit` omitted means every match. The dropdown is a virtualised FlatList, so
+ * a long list costs no more to render than a short one, and capping it only hid
+ * rooms the user came looking for.
  */
-export function getRoomsInBuilding(bldgNo: string, token = '', limit = 8): RoomMatch[] {
+export function getRoomsInBuilding(bldgNo: string, token = '', limit?: number): RoomMatch[] {
   const building = getBuildingById(bldgNo);
   if (!building) return [];
   const rooms = getRoomsByBuilding().get(bldgNo) ?? [];
   const upper = token.trim().toUpperCase();
-  const filtered = upper ? rankRooms(rooms.filter(r => r.roomNumber.toUpperCase().startsWith(upper)), upper) : rooms;
-  return filtered.slice(0, limit).map(r => ({
+  // With no token there is nothing to rank against, so order the building
+  // instead: floors from the bottom up, rooms in natural order within each.
+  // Source order here is effectively arbitrary, which is what made an empty
+  // query look like a dump rather than something worth browsing.
+  const filtered = upper
+    ? rankRooms(rooms.filter(r => r.roomNumber.toUpperCase().startsWith(upper)), upper)
+    : [...rooms].sort(
+        (a, b) =>
+          floorSortKey(a.floor) - floorSortKey(b.floor) ||
+          a.roomNumber.localeCompare(b.roomNumber, undefined, { numeric: true, sensitivity: 'base' }),
+      );
+  return (limit == null ? filtered : filtered.slice(0, limit)).map(r => ({
     building,
     roomId: r.room_id,
     bldgNo: r.bldg_no,

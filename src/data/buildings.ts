@@ -87,7 +87,8 @@ export function sortedFloors(floors: string[]): string[] {
   return [...floors].sort((a, b) => floorSortKey(a) - floorSortKey(b));
 }
 
-function floorSortKey(code: string): number {
+/** Orders floor codes: lower levels, then ground, then numbered floors. */
+export function floorSortKey(code: string): number {
   const upper = code.toUpperCase();
   if (upper === 'LL') return -2;
   if (upper.startsWith('B')) return -1;

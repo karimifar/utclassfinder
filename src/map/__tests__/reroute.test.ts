@@ -14,12 +14,12 @@ const MOVED: LngLat = [-97.7335, 30.28539];
 /** Feed a run of identical fixes, as the location stream would. */
 function walk(
   state: RerouteState,
-  ticks: { offBy: number; coords?: LngLat; arrived?: boolean; now: number }[],
+  ticks: { offBy: number; accuracy?: number | null; coords?: LngLat; arrived?: boolean; now: number }[],
 ) {
   let current = state;
   const reroutes: number[] = [];
-  ticks.forEach(({ offBy, coords = HERE, arrived = false, now }) => {
-    const result = nextRerouteState(current, { offBy, coords, arrived, now });
+  ticks.forEach(({ offBy, accuracy = 5, coords = HERE, arrived = false, now }) => {
+    const result = nextRerouteState(current, { offBy, accuracy, coords, arrived, now });
     current = result.state;
     if (result.reroute) reroutes.push(now);
   });
@@ -106,5 +106,33 @@ describe('nextRerouteState', () => {
       { offBy: 60, arrived: true, now: 2000 },
     ]);
     expect(reroutes).toEqual([]);
+  });
+
+  // The reroute logic shipped without this: a fix wobbling by 80m reads as
+  // "off route" at a 30m threshold, and the good route gets thrown away.
+  it('ignores an off-route reading the fix is too coarse to support', () => {
+    const { reroutes } = walk(initialRerouteState, [
+      { offBy: 60, accuracy: 80, now: 0 },
+      { offBy: 60, accuracy: 80, now: 1000 },
+      { offBy: 60, accuracy: 80, now: 2000 },
+    ]);
+    expect(reroutes).toEqual([]);
+  });
+
+  it('still reroutes once the fix tightens up', () => {
+    const { reroutes } = walk(initialRerouteState, [
+      { offBy: 60, accuracy: 80, now: 0 },
+      { offBy: 60, accuracy: 8, now: 1000 },
+      { offBy: 60, accuracy: 8, now: 2000 },
+    ]);
+    expect(reroutes).toHaveLength(1);
+  });
+
+  it('does not block rerouting when no accuracy is reported', () => {
+    const { reroutes } = walk(initialRerouteState, [
+      { offBy: 60, accuracy: null, now: 0 },
+      { offBy: 60, accuracy: null, now: 1000 },
+    ]);
+    expect(reroutes).toHaveLength(1);
   });
 });
