@@ -59,6 +59,8 @@ describe('useWalkingRoute', () => {
     expect(url).toContain('/mapbox/walking/');
     expect(url).toContain('walkway_bias=1');
     expect(url).toContain('overview=full');
+    // Turn-by-turn maneuvers only come back when this is asked for.
+    expect(url).toContain('steps=true');
   });
 
   // T-3 requirement 7: a room can be selected in the first second after launch,

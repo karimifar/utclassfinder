@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { LngLat } from '../data/types';
+import { parseSteps, type RouteStep } from './steps';
 import { haversine, MAX_WALK_METRES, type RouteState } from './routeState';
 
 /**
@@ -40,6 +41,8 @@ export interface WalkingRouteOptions {
 
 export interface WalkingRoute {
   route: GeoJSON.Feature<GeoJSON.LineString> | null;
+  /** Turn-by-turn maneuvers, empty when Directions returned none. */
+  steps: RouteStep[];
   state: RouteState;
 }
 
@@ -60,6 +63,7 @@ export function useWalkingRoute({
   fetchImpl,
 }: WalkingRouteOptions): WalkingRoute {
   const [route, setRoute] = useState<GeoJSON.Feature<GeoJSON.LineString> | null>(null);
+  const [steps, setSteps] = useState<RouteStep[]>([]);
   const [state, setState] = useState<RouteState>({ status: 'idle' });
 
   const getOriginRef = useRef(getOrigin);
@@ -75,6 +79,7 @@ export function useWalkingRoute({
   useEffect(() => {
     if (destLng == null || destLat == null || !accessToken) {
       setRoute(null);
+      setSteps([]);
       setState({ status: 'idle' });
       return;
     }
@@ -82,6 +87,7 @@ export function useWalkingRoute({
     const origin = getOriginRef.current();
     if (!origin) {
       setRoute(null);
+      setSteps([]);
       setState({
         status: 'error',
         reason: permissionDenied ? 'no-permission' : 'no-location',
@@ -93,6 +99,7 @@ export function useWalkingRoute({
     // 5km straight line already isn't a walk. Skip the round trip.
     if (haversine(origin, [destLng, destLat]) > MAX_WALK_METRES) {
       setRoute(null);
+      setSteps([]);
       setState({ status: 'error', reason: 'too-far' });
       return;
     }
@@ -108,7 +115,7 @@ export function useWalkingRoute({
       // than following them — indistinguishable, on the map, from the router
       // having skipped them.
       `https://api.mapbox.com/directions/v5/mapbox/walking/${oLng},${oLat};${destLng},${destLat}` +
-        `?geometries=geojson&overview=full&walkway_bias=${WALKWAY_BIAS}&access_token=${accessToken}`,
+        `?geometries=geojson&overview=full&steps=true&walkway_bias=${WALKWAY_BIAS}&access_token=${accessToken}`,
       { signal: controller.signal },
     )
       .then((r) => r.json())
@@ -117,21 +124,24 @@ export function useWalkingRoute({
         const leg = data?.routes?.[0];
         if (!leg) {
           setRoute(null);
+          setSteps([]);
           const noRoute = data?.code === 'NoRoute' || data?.code === 'NoSegment';
           setState({ status: 'error', reason: noRoute ? 'no-route' : 'failed' });
           return;
         }
         setRoute({ type: 'Feature', properties: {}, geometry: leg.geometry });
+        setSteps(parseSteps(leg));
         setState({ status: 'ok', distance: leg.distance, duration: leg.duration });
       })
       .catch((err) => {
         if (controller.signal.aborted || err?.name === 'AbortError') return;
         setRoute(null);
+        setSteps([]);
         setState({ status: 'error', reason: 'failed' });
       });
 
     return () => controller.abort();
   }, [destLng, destLat, originKey, permissionDenied, accessToken]);
 
-  return { route, state };
+  return { route, steps, state };
 }

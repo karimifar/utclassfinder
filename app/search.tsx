@@ -45,7 +45,13 @@ export default function Search() {
   const [showResults, setShowResults] = useState(false);
   const [mapHeading, setMapHeading] = useState(0);
   const [routeState, setRouteState] = useState<RouteState>({ status: 'idle' });
-  const [navProgress, setNavProgress] = useState<NavProgress>({ bearing: null, distanceToDestination: null, accuracy: null });
+  const [navProgress, setNavProgress] = useState<NavProgress>({
+    maneuverRotation: 0,
+    distanceToDestination: null,
+    accuracy: null,
+    instruction: null,
+    distanceToManeuver: null,
+  });
   const [navigateMode, setNavigateMode] = useState(false);
   const [followLost, setFollowLost] = useState(false);
   // Only changes when the fix crosses a quality band, so this costs one render
@@ -633,24 +639,29 @@ export default function Search() {
       {selectedRoom && navigateMode && !arrived && (
         <View style={[styles.navBar, { bottom: panelBottom }]}>
           <View style={styles.navArrowWrap}>
-            {/* Points along the next route segment, relative to what's on
-                screen — a crow-flies bearing points through buildings the
-                route goes around. */}
+            {/* Shows the maneuver, not a compass bearing: a left turn points
+                left however the phone is held. It used to swing with the map
+                heading, which contradicted the instruction beside it. */}
             <Text style={[
               styles.navArrow,
-              navProgress.bearing !== null &&
-                { transform: [{ rotate: `${navProgress.bearing - mapHeading}deg` }] },
+              { transform: [{ rotate: `${navProgress.maneuverRotation}deg` }] },
             ]}>↑</Text>
           </View>
           <View style={styles.navInfo}>
+            {/* The maneuver, in Mapbox's own words. Falls back to the
+                destination before the first instruction lands, and on the last
+                stretch where there is nothing left to announce. */}
             <Text style={styles.navDest} numberOfLines={1}>
-              {selectedRoom.building.abbr} {selectedRoom.roomNumber}
+              {navProgress.instruction ?? `${selectedRoom.building.abbr} ${selectedRoom.roomNumber}`}
             </Text>
-            {routeReady && (
-              <Text style={styles.navEta}>
-                ~{Math.max(1, Math.round(routeReady.duration / 60))} min · {formatDistance(routeReady.distance)}
-              </Text>
-            )}
+            <Text style={styles.navEta} numberOfLines={1}>
+              {navProgress.instruction !== null && navProgress.distanceToManeuver !== null
+                ? `${formatDistance(navProgress.distanceToManeuver)} · `
+                : ''}
+              {routeReady
+                ? `~${Math.max(1, Math.round(routeReady.duration / 60))} min to ${selectedRoom.building.abbr} ${selectedRoom.roomNumber}`
+                : `${selectedRoom.building.abbr} ${selectedRoom.roomNumber}`}
+            </Text>
           </View>
           <Pressable
             style={styles.navEnd}

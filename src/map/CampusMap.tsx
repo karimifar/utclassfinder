@@ -5,12 +5,14 @@ import { Asset } from 'expo-asset';
 import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { Dimensions, StyleSheet, Text, View } from 'react-native';
 import { BUILDINGS } from '../data/buildings';
+import { nearestEntrance } from '../data/entrances';
 import type { Building, LngLat, RoomMatch } from '../data/types';
 import { colors } from '../theme';
 import { frameFootprint } from './framing';
 import { fixQuality, type FixQuality } from './fixQuality';
 import { shouldTurnCamera, smoothHeading } from './heading';
 import { initialRerouteState, nextRerouteState, type RerouteState } from './reroute';
+import { advanceStep, maneuverRotation, stepInstruction } from './steps';
 import { ARRIVAL_METRES, haversine, MAX_WALK_METRES, type RouteState } from './routeState';
 import { useWalkingRoute } from './useWalkingRoute';
 
@@ -59,8 +61,12 @@ export interface CampusMapHandle {
 
 /** Where the user is walking next, for the nav bar's arrow and arrival card. */
 export interface NavProgress {
-  /** Bearing of the route segment ahead, or null when there's no route. */
-  bearing: number | null;
+  /**
+   * Which way the next maneuver turns, in degrees clockwise from straight
+   * ahead. Screen-relative and fixed — a left turn is a left turn however the
+   * phone is held.
+   */
+  maneuverRotation: number;
   /** Straight-line metres to the destination, or null when unknown. */
   distanceToDestination: number | null;
   /**
@@ -69,6 +75,10 @@ export interface NavProgress {
    * looser than the arrival radius cannot say whether we are inside it.
    */
   accuracy: number | null;
+  /** What to do next, in Mapbox's phrasing, or null when there's nothing to say. */
+  instruction: string | null;
+  /** Metres to the maneuver `instruction` describes. */
+  distanceToManeuver: number | null;
 }
 
 const token = Constants.expoConfig?.extra?.mapboxAccessToken as string | undefined;
@@ -355,12 +365,38 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
 
     // Changes exactly when the origin should be re-read, so a route requested
     // before the first GPS fix is retried the moment one lands.
+    /**
+     * The door to walk to, when UT has surveyed one for this building.
+     *
+     * Recomputed only when the room changes or the origin is re-read — never
+     * per fix. The destination feeds useWalkingRoute, and a destination that
+     * moved with the walker would re-request directions forever.
+     */
+    const entrance = useMemo(
+      () => (selectedRoom ? nearestEntrance(selectedRoom.building.abbr, currentOrigin() ?? selectedRoom.center) : null),
+      // The three beyond selectedRoom look unnecessary to the linter because
+      // the body reads the origin through a ref rather than naming them. They
+      // are exactly the signal that the origin has changed — first fix, a
+      // simulated origin, a reroute — and dropping them would leave the door
+      // chosen from a position the walker has since left.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      [selectedRoom, hasFix, debugOrigin, rerouteSeq],
+    );
+    /**
+     * Where the walk actually ends. The door when we know it, the room's own
+     * centroid when we don't — which is what Directions then snaps to the
+     * nearest path, door or not.
+     */
+    const walkTarget: LngLat | null = entrance?.center ?? selectedRoom?.center ?? null;
+    const walkTargetRef = useRef(walkTarget);
+    useEffect(() => { walkTargetRef.current = walkTarget; });
+
     const originKey = debugOrigin
       ? `debug:${debugOrigin[0]},${debugOrigin[1]}`
       : hasFix ? `gps:${rerouteSeq}` : 'none';
 
-    const { route, state: routeState } = useWalkingRoute({
-      destination: selectedRoom?.center ?? null,
+    const { route, steps, state: routeState } = useWalkingRoute({
+      destination: walkTarget,
       getOrigin: currentOrigin,
       originKey,
       permissionDenied: permission === 'denied',
@@ -369,6 +405,12 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
     useEffect(() => { onRouteStateRef.current?.(routeState); }, [routeState]);
     const routeRef = useRef(route);
     useEffect(() => { routeRef.current = route; }, [route]);
+    const stepsRef = useRef(steps);
+    useEffect(() => { stepsRef.current = steps; }, [steps]);
+    /** Index of the maneuver being walked towards. Only ever moves forward. */
+    const stepIndexRef = useRef(0);
+    // A new route renumbers the maneuvers, so the index cannot carry over.
+    useEffect(() => { stepIndexRef.current = 0; }, [steps]);
 
     // Whether the user panned away from the follow camera during navigation.
     const [followDisengaged, setFollowDisengaged] = useState(false);
@@ -482,41 +524,48 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
       return () => { cancelled = true; };
     }, []);
 
-    /** Push the bearing to walk and the distance remaining up to the nav bar. */
+    /** Push the next maneuver and the distance remaining up to the nav bar. */
     const reportNavProgress = (coords: [number, number]) => {
       const room = selectedRoomRef.current;
       if (!room) {
-        onNavProgressRef.current?.({ bearing: null, distanceToDestination: null, accuracy: null });
+        onNavProgressRef.current?.({
+          maneuverRotation: 0,
+          distanceToDestination: null,
+          accuracy: null,
+          instruction: null,
+          distanceToManeuver: null,
+        });
         return;
       }
-      const current = routeRef.current;
-      let bearing: number | null = null;
-      if (current) {
-        const routeCoords = current.geometry.coordinates as [number, number][];
-        const { remaining } = splitRouteAtUser(routeCoords, coords);
-        // The segment ahead, not the crow-flies bearing — the route goes around
-        // buildings, and an arrow pointing through one is worse than useless.
-        if (remaining.length >= 2) bearing = segmentBearing(remaining[0], remaining[1]);
-      }
-      if (bearing === null) bearing = segmentBearing(coords, room.center);
+      // Which maneuver is next, from wherever the walker actually is.
+      const currentSteps = stepsRef.current;
+      stepIndexRef.current = advanceStep(currentSteps, coords, stepIndexRef.current);
+      const step = currentSteps[stepIndexRef.current];
+
       onNavProgressRef.current?.({
-        bearing,
-        distanceToDestination: haversine(coords, room.center),
+        maneuverRotation: maneuverRotation(step),
+        // To the door when we know it: that is where the walk ends.
+        distanceToDestination: haversine(coords, walkTargetRef.current ?? room.center),
         // A simulated origin is exactly where it says it is. Reporting the real
         // device's uncertainty here would judge a synthetic distance against an
         // unrelated fix, and a poor one indoors would block arrival outright.
         accuracy: debugOriginRef.current ? 0 : accuracyRef.current,
+        instruction: stepInstruction(step),
+        distanceToManeuver: step ? haversine(coords, step.location) : null,
       });
     };
 
     /** Re-request directions when the user has clearly left the route. */
     const maybeReroute = (coords: [number, number], offBy: number) => {
-      const room = selectedRoomRef.current;
       const { state, reroute } = nextRerouteState(rerouteState.current, {
         offBy,
         accuracy: accuracyRef.current,
         coords,
-        arrived: room != null && haversine(coords, room.center) <= ARRIVAL_METRES,
+        // Measured to the door we are actually walking to. Against the room's
+        // centroid instead, a large building leaves you metres from the
+        // entrance but still far from the room, and arrival never fires.
+        arrived: walkTargetRef.current != null
+          && haversine(coords, walkTargetRef.current) <= ARRIVAL_METRES,
         now: Date.now(),
       });
       rerouteState.current = state;
@@ -533,13 +582,19 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
 
     useEffect(() => {
       if (!navigateMode) {
-        onNavProgressRef.current?.({ bearing: null, distanceToDestination: null, accuracy: null });
+        onNavProgressRef.current?.({
+          maneuverRotation: 0,
+          distanceToDestination: null,
+          accuracy: null,
+          instruction: null,
+          distanceToManeuver: null,
+        });
         return;
       }
       const origin = currentOrigin();
       if (origin) reportNavProgress(origin);
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [navigateMode, route, selectedRoom, debugOrigin, hasFix]);
+    }, [navigateMode, route, steps, selectedRoom, debugOrigin, hasFix]);
 
     /**
      * The non-navigating camera for a selected room: the user, the room, and
