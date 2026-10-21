@@ -906,10 +906,16 @@ tag goes on after the build starts — never name a branch or commit after a num
 expect. (That is how commit `9a69c2e`, titled "Build 8", shipped as build 9.)
 
 ```bash
-eas build -p ios -e testflight --auto-submit --non-interactive --no-wait
+eas build -p ios -e testflight --non-interactive --no-wait
 # note the build number it prints, then:
 git tag -a ios-b<N> <commit> -m "TestFlight build <N> (<version>)" && git push origin ios-b<N>
+# once the build finishes — interactive, asks for the Apple ID and its app-specific password:
+eas submit -p ios --profile testflight --id <build id>
 ```
+
+Submission is a separate, interactive step rather than `--auto-submit`: App Store Connect is
+reached with an Apple ID and app-specific password, not an API key stored on EAS, so it
+needs a person at the keyboard.
 
 Builds 1–3 have no tags: the commits they were built from did not survive a history rewrite.
 Build 8 never reached EAS's build list. The older `V1-6/19` … `V5-9/17` branches are dated
