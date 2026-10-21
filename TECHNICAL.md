@@ -882,13 +882,12 @@ node scripts/build-buildings.mjs assets/data/buildings_rooms.geojson
 
 ## Versions and builds
 
-TestFlight shows two numbers, e.g. **0.2.0 (10)**. They have different owners.
+TestFlight shows two numbers, e.g. **0.2.0 (11)**. They have different owners.
 
-**Build number: EAS owns it. Never set it by hand.** `eas.json` has
-`"appVersionSource": "remote"` and `autoIncrement: true` on `production`, which `testflight`
-extends, so EAS keeps the counter on its servers and adds one per build. `CFBundleVersion` in
-`Info.plist` stays at 1 and is overwritten at build time. Check the counter with
-`eas build:version:get -p ios -e testflight`.
+**Build number: lives in git, in `ios/UTClassFinder/Info.plist` (`CFBundleVersion`), and
+always holds the number the *next* build will use.** `eas.json` has
+`"appVersionSource": "local"` and no `autoIncrement`, so EAS builds whatever the plist says.
+Don't edit it by hand — `npm run release:ios` moves it, and only after a build succeeds.
 
 **Version: set by hand, in four places at once** — `app.config.js`, `package.json`,
 `package-lock.json` (top two entries) and `ios/UTClassFinder/Info.plist`
@@ -900,26 +899,30 @@ plist, not `app.config.js`; a bump that misses the plist ships the old version. 
   testers would notice; leave it for a rebuild that only fixes the last one.
 - `1.0.0` is the first App Store release.
 
-**Every build gets a tag**: `ios-b<build number>` on the commit it was built from, annotated
-`TestFlight build N (version)`. The build number is only known once EAS assigns it, so the
-tag goes on after the build starts — never name a branch or commit after a number you
-expect. (That is how commit `9a69c2e`, titled "Build 8", shipped as build 9.)
+**Release with `npm run release:ios`** (`scripts/release-ios.sh`). It refuses to run with
+uncommitted or unpushed work, since EAS builds what is committed; builds the number in the
+plist and waits; and then:
+
+- **on success** — tags the built commit `ios-b<N>` (annotated `TestFlight build N
+  (version)`), commits the plist bumped to N+1, pushes both, and offers to submit.
+- **on failure** — changes nothing. Fix the problem, run it again, and the retry ships under
+  the same number. Apple never saw the failed one, so reusing it is fine.
+
+Submission is interactive rather than `--auto-submit`: App Store Connect is reached with an
+Apple ID and app-specific password, not an API key stored on EAS, so it needs a person at the
+keyboard. EAS takes the password from `EXPO_APPLE_APP_SPECIFIC_PASSWORD` (the script prompts
+for it, silently) and asks for the Apple ID. To submit a finished build later:
 
 ```bash
-eas build -p ios -e testflight --non-interactive --no-wait
-# note the build number it prints, then:
-git tag -a ios-b<N> <commit> -m "TestFlight build <N> (<version>)" && git push origin ios-b<N>
-# once the build finishes — interactive, asks for the Apple ID and its app-specific password:
+read -s "EXPO_APPLE_APP_SPECIFIC_PASSWORD?App-specific password: " && export EXPO_APPLE_APP_SPECIFIC_PASSWORD && echo
 eas submit -p ios --profile testflight --id <build id>
 ```
 
-Submission is a separate, interactive step rather than `--auto-submit`: App Store Connect is
-reached with an Apple ID and app-specific password, not an API key stored on EAS, so it
-needs a person at the keyboard.
-
-**A failed build still uses up its number.** EAS increments when the build starts, so the
-next attempt gets the next number and TestFlight's sequence has gaps. Build 10 failed this
-way (below); build 8 is probably the same.
+**Why it works this way.** Until build 11, EAS counted remotely (`appVersionSource: remote`,
+`autoIncrement: true`) and took a number the moment a build *started*, so every failure left a
+gap in TestFlight: build 10 failed (below) and 8 almost certainly did too. Before the tags,
+numbers were also guessed into names ahead of time — commit `9a69c2e`, titled "Build 8",
+shipped as build 9. Keeping the number in git, and moving it only on success, removes both.
 
 **The iOS build image is pinned**, to `macos-tahoe-26.5-xcode-26.6` in `eas.json`, the image
 that built 9. It was `latest` until `latest` became Xcode 27.1, which turns a pod deployment
@@ -929,8 +932,8 @@ before compiling anything. Moving to Xcode 27 means raising those targets in the
 `post_install`, then finding whatever else 27 rejects; until then, change the image
 deliberately rather than by following `latest`.
 
-Builds 1–3 have no tags: the commits they were built from did not survive a history rewrite. The older `V1-6/19` … `V5-9/17` branches are dated
-milestones from before this scheme, not builds.
+Builds 1–3 have no tags: the commits they were built from did not survive a history rewrite.
+The older `V1-6/19` … `V5-9/17` branches are dated milestones from before this scheme, not builds.
 
 ---
 
