@@ -400,6 +400,13 @@ selected-room-outline Selected room border (burntOrangeDark, 2px)
 selected-room-label  Selected room number (13px DIN Bold, white, always visible)
 ```
 
+#### `elevators` and `elevator-tip` ShapeSources
+Only mounted while a floor plan is open and the building has a public elevator.
+```
+elevator-icon        Elevator badge; size exponential base 2 to zoom 18, 32pt from there in
+elevator-tip-label   "Elevators" for 2.5s above a tapped icon
+```
+
 #### `building-labels` ShapeSource
 ```
 building-abbr   minZoom 15, 11px DIN Bold burntOrangeDark with white halo
@@ -870,6 +877,43 @@ To regenerate data files after a GeoJSON update:
 node scripts/build-room-index.mjs
 node scripts/build-buildings.mjs assets/data/buildings_rooms.geojson
 ```
+
+---
+
+## Versions and builds
+
+TestFlight shows two numbers, e.g. **0.2.0 (10)**. They have different owners.
+
+**Build number: EAS owns it. Never set it by hand.** `eas.json` has
+`"appVersionSource": "remote"` and `autoIncrement: true` on `production`, which `testflight`
+extends, so EAS keeps the counter on its servers and adds one per build. `CFBundleVersion` in
+`Info.plist` stays at 1 and is overwritten at build time. Check the counter with
+`eas build:version:get -p ios -e testflight`.
+
+**Version: set by hand, in four places at once** — `app.config.js`, `package.json`,
+`package-lock.json` (top two entries) and `ios/UTClassFinder/Info.plist`
+(`CFBundleShortVersionString`). Because the `ios/` directory is committed, EAS reads the
+plist, not `app.config.js`; a bump that misses the plist ships the old version. The
+`MARKETING_VERSION` in `project.pbxproj` is not referenced by the plist and does nothing.
+
+- Stay on `0.x` through testing. Bump the minor (`0.2.0` → `0.3.0`) for a TestFlight round
+  testers would notice; leave it for a rebuild that only fixes the last one.
+- `1.0.0` is the first App Store release.
+
+**Every build gets a tag**: `ios-b<build number>` on the commit it was built from, annotated
+`TestFlight build N (version)`. The build number is only known once EAS assigns it, so the
+tag goes on after the build starts — never name a branch or commit after a number you
+expect. (That is how commit `9a69c2e`, titled "Build 8", shipped as build 9.)
+
+```bash
+eas build -p ios -e testflight --auto-submit --non-interactive --no-wait
+# note the build number it prints, then:
+git tag -a ios-b<N> <commit> -m "TestFlight build <N> (<version>)" && git push origin ios-b<N>
+```
+
+Builds 1–3 have no tags: the commits they were built from did not survive a history rewrite.
+Build 8 never reached EAS's build list. The older `V1-6/19` … `V5-9/17` branches are dated
+milestones from before this scheme, not builds.
 
 ---
 

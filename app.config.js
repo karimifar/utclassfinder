@@ -28,7 +28,7 @@ module.exports = ({ config }) => ({
   name: 'UT Class Finder',
   slug: 'utclassfinder',
   scheme: 'utclassfinder', // OAuth redirect: utclassfinder://redirect
-  version: '0.1.0',
+  version: '0.2.0',
   icon: './assets/Visuals/icon.png',
   orientation: 'portrait',
   userInterfaceStyle: 'automatic',
