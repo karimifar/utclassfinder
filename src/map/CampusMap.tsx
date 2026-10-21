@@ -5,6 +5,7 @@ import { Asset } from 'expo-asset';
 import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { Dimensions, StyleSheet, Text, View } from 'react-native';
 import { BUILDINGS } from '../data/buildings';
+import { getElevators } from '../data/elevators';
 import { nearestEntrance } from '../data/entrances';
 import type { Building, LngLat, RoomMatch } from '../data/types';
 import { colors } from '../theme';
@@ -750,6 +751,44 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
       };
     }, [navigateMode, selectedRoom, route]);
 
+    /**
+     * Public elevators in the building whose floor plan is open. UT's data has
+     * one point per elevator bank and no floor list, so the same points show
+     * on every floor — a bank serves the whole building.
+     */
+    const elevatorShape = useMemo(() => {
+      const floorOpen = (selectedRoom?.floor ?? selectedFloor) != null;
+      const abbr = selectedRoom?.building.abbr ?? selectedBuilding?.abbr;
+      if (!floorOpen || !abbr) return null;
+      const elevators = getElevators(abbr);
+      if (elevators.length === 0) return null;
+      return {
+        type: 'FeatureCollection' as const,
+        features: elevators.map((e) => ({
+          type: 'Feature' as const,
+          properties: {},
+          geometry: { type: 'Point' as const, coordinates: e.center },
+        })),
+      };
+    }, [selectedRoom, selectedBuilding, selectedFloor]);
+
+    // Tapping an elevator names it for a moment, standing in for the map
+    // legend the app doesn't have. Cleared when the building or floor changes,
+    // so the label never floats over a plan it doesn't belong to.
+    const [elevatorTip, setElevatorTip] = useState<LngLat | null>(null);
+    const elevatorTipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => {
+      setElevatorTip(null);
+      return () => {
+        if (elevatorTipTimer.current) clearTimeout(elevatorTipTimer.current);
+      };
+    }, [elevatorShape]);
+    const showElevatorTip = (at: LngLat) => {
+      if (elevatorTipTimer.current) clearTimeout(elevatorTipTimer.current);
+      setElevatorTip(at);
+      elevatorTipTimer.current = setTimeout(() => setElevatorTip(null), 2500);
+    };
+
     if (!token) {
       return (
         <View style={[StyleSheet.absoluteFill, styles.placeholder]}>
@@ -847,6 +886,7 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
             images={{
               'nav-arrow': require('../../assets/Visuals/nav-arrow.png'),
               'room-pin': require('../../assets/Visuals/room-pin.png'),
+              elevator: require('../../assets/Visuals/elevator.png'),
             }}
           />
 
@@ -971,6 +1011,55 @@ export const CampusMap = forwardRef<CampusMapHandle, Props>(
                   textFont: ['DIN Offc Pro Bold', 'Arial Unicode MS Bold'],
                   textHaloColor: colors.burntOrangeDark,
                   textHaloWidth: 0.5,
+                  textAllowOverlap: true,
+                  textIgnorePlacement: true,
+                }}
+              />
+            </Mapbox.ShapeSource>
+          )}
+
+          {/* Above the floor plan so a room label never hides the way up.
+              Shown whenever the floor plan is. Out to zoom 18 it behaves like
+              part of the plan — halving with every zoom level, base 2, so it
+              keeps its footprint on the building the way a room does. Closer
+              in it holds at full size instead of blowing up with the plan. */}
+          {elevatorShape && (
+            <Mapbox.ShapeSource
+              id="elevators"
+              shape={elevatorShape}
+              onPress={(e) => {
+                const hit = e.features[0]?.geometry;
+                if (hit?.type === 'Point') showElevatorTip(hit.coordinates as LngLat);
+              }}
+            >
+              <Mapbox.SymbolLayer
+                id="elevator-icon"
+                style={{
+                  iconImage: 'elevator',
+                  iconSize: ['interpolate', ['exponential', 2], ['zoom'], 10, 1 / 256, 18, 1] as any,
+                  iconAllowOverlap: true,
+                }}
+              />
+            </Mapbox.ShapeSource>
+          )}
+
+          {elevatorShape && elevatorTip && (
+            <Mapbox.ShapeSource
+              id="elevator-tip"
+              shape={{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: elevatorTip } }}
+            >
+              <Mapbox.SymbolLayer
+                id="elevator-tip-label"
+                style={{
+                  textField: 'Elevators',
+                  textFont: ['DIN Offc Pro Bold', 'Arial Unicode MS Bold'],
+                  textSize: 13,
+                  textColor: colors.white,
+                  textHaloColor: '#404040',
+                  textHaloWidth: 2,
+                  // Above the icon, clear of it at the largest icon size.
+                  textAnchor: 'bottom',
+                  textOffset: [0, -1.6],
                   textAllowOverlap: true,
                   textIgnorePlacement: true,
                 }}

@@ -13,6 +13,7 @@
     "build:elevators": "node scripts/build-elevators.mjs",
     "build:nav-arrow": "node scripts/build-nav-arrow.mjs",
     "build:room-pin": "node scripts/build-room-pin.mjs",
+    "build:elevator-icon": "node scripts/build-elevator-icon.mjs",
     "lint": "expo lint",
     "test": "jest",
     "test:broker": "node --test server/__tests__/",
