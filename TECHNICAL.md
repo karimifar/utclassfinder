@@ -917,8 +917,19 @@ Submission is a separate, interactive step rather than `--auto-submit`: App Stor
 reached with an Apple ID and app-specific password, not an API key stored on EAS, so it
 needs a person at the keyboard.
 
-Builds 1–3 have no tags: the commits they were built from did not survive a history rewrite.
-Build 8 never reached EAS's build list. The older `V1-6/19` … `V5-9/17` branches are dated
+**A failed build still uses up its number.** EAS increments when the build starts, so the
+next attempt gets the next number and TestFlight's sequence has gaps. Build 10 failed this
+way (below); build 8 is probably the same.
+
+**The iOS build image is pinned**, to `macos-tahoe-26.5-xcode-26.6` in `eas.json`, the image
+that built 9. It was `latest` until `latest` became Xcode 27.1, which turns a pod deployment
+target below iOS 15 from a warning into an error. Two resource-bundle targets trip it —
+`MapboxMaps-MapboxMapsResources` (14.0) and `RNSVG-RNSVGFilters` (12.4) — and build 10 failed
+before compiling anything. Moving to Xcode 27 means raising those targets in the Podfile's
+`post_install`, then finding whatever else 27 rejects; until then, change the image
+deliberately rather than by following `latest`.
+
+Builds 1–3 have no tags: the commits they were built from did not survive a history rewrite. The older `V1-6/19` … `V5-9/17` branches are dated
 milestones from before this scheme, not builds.
 
 ---
